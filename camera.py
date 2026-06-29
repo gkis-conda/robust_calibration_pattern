@@ -66,7 +66,7 @@ class ProjectiveCamera:
         self.k1 = k1
         self.cx = float(cx)
         self.cy = float(cy)
-
+        self.f_px = f_px
         # 1. Clean Constructor Initialization of the Intrinsic Camera Matrix (K)
         self.K = np.array([
             [f_px, 0.0, self.cx],
@@ -84,6 +84,33 @@ class ProjectiveCamera:
         # 3. Deterministic Structural Boundary Profiler
         # Always computed automatically based on the distortion coefficients
         self.max_stable_radius = compute_max_radius(self.distortion_model, self.cx, self.cy, img_shape=self.img_shape)
+
+    def undistort(self, point):
+        """
+        :param point:
+        :return:
+        """
+        MAX_ITER = 20
+        a = point
+        b = point * 2
+        r_d = np.hypot(a[0] - self.cx, a[1] - self.cy)
+        r_prev = 2 * r_d
+        for k in range(MAX_ITER):
+            p = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+            p_d = self.distortion_model([p])[0]
+            r = np.hypot(p_d[0]-self.cx, p_d[1]-self.cy)
+            if r < r_d:
+                a = p
+            else:
+                b = p
+            if np.abs(r - r_prev) < 1:
+                break
+            r_prev = r
+        return p
+
+
+    def undistort_points(self, points):
+        return [self.undistort(point) for point in points]
 
     def compute_homography(self, Rt: np.ndarray) -> np.ndarray:
         """Computes a flat 3x3 planar Homography matrix from 3x4 extrinsics."""

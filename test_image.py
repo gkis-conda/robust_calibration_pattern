@@ -1,9 +1,12 @@
-import cv2
 import numpy as np
 from scipy.spatial import KDTree
 from generate import PhysicalMeshGenerator
 from camera import compute_camera_projection_matrix, ProjectiveCamera
 from detector import *
+import json
+import os
+
+ENGINE_FULL_NAME = "Galois Field Pattern Matching Engine"
 
 def render_warped_grid_shapes(mesh_generator, cam: ProjectiveCamera, Rt: np.ndarray) -> np.ndarray:
     """
@@ -137,8 +140,6 @@ def calculate_reconstruction_metrics(topological_matrix: np.ndarray,
     Computes precise performance and topological divergence statistics by building
     a KD-Tree from live sensor detections and scanning the ground-truth blueprint.
 
-    Fully ASCII-compliant implementation.
-
     Args:
         topological_matrix (np.ndarray): Decoded tracking map lookup table framework.
         detected_points (np.ndarray): Raw 2D pixel coordinates found by blob finder.
@@ -245,7 +246,11 @@ def calculate_reconstruction_metrics(topological_matrix: np.ndarray,
     # Accuracy is evaluated strictly over what points were physically observable on screen
     accuracy_score = (true_positives / total_visible_targets) * 100.0 if total_visible_targets > 0 else 0.0
 
+    # STABILITY CRITERIA CHECK: Pass if accuracy is >= 90% and there are ZERO false positives
+    is_case_passed = (accuracy_score >= 90.0) and (misalignments == 0)and (ghost_nodes == 0)
+
     return {
+        "is_passed": is_case_passed,
         "accuracy": accuracy_score,
         "true_positives": true_positives,
         "total_visible_targets": total_visible_targets,
@@ -350,7 +355,8 @@ def evaluate_single_integration_case(base_blueprint: np.ndarray,
             modified_blueprint = blueprint,
             generator=generator,
             camera=cam_obj,
-            Rt=Rt
+            Rt=Rt,
+            legend_position = "bottom_right"
         )
 
         # Save the diagnostic visualization matrix directly to disk
@@ -371,6 +377,7 @@ def evaluate_single_integration_case(base_blueprint: np.ndarray,
 
         metrics["status"] = "success"
         metrics["case_name"] = case_name
+        metrics["description"] = case_payload["description"]
 
     return metrics
 
@@ -401,6 +408,92 @@ def compute_visible_blueprint(base_blueprint: np.ndarray,
     return visible_blueprint
 
 
+def render_telemetry_legend_overlay(frame: np.ndarray,
+                                    position: str = "bottom_left",
+                                    opacity: float = 0.75) -> np.ndarray:
+    """
+    Draws a semi-transparent background panel and color-coded telemetry legend
+    at a user-specified corner quadrant on the video tracking frame canvas.
+
+    Variables Description:
+        frame (np.ndarray) : The image canvas matrix to receive the overlay.
+        position (str)     : Screen quadrant position flag ("bottom_left",
+                             "bottom_right", "top_left", "top_right").
+        opacity (float)    : Transparency blending factor for the backdrop box.
+
+    Returns:
+        np.ndarray         : Canvas matrix with the embedded telemetry legend panel.
+    """
+    H_img, W_img = frame.shape[0], frame.shape[1]
+
+    # 1. Define fixed dimension bounds for the legend panel window box
+    panel_w = 420
+    panel_h = 160
+    margin_x = 20
+    margin_y = 20
+
+    # 2. Compute absolute pixel box limits dynamically based on position anchor
+    pos_key = position.strip().lower()
+
+    if pos_key == "top_left":
+        x1 = margin_x
+        y1 = margin_y
+    elif pos_key == "top_right":
+        x1 = W_img - panel_w - margin_x
+        y1 = margin_y
+    elif pos_key == "bottom_right":
+        x1 = W_img - panel_w - margin_x
+        y1 = H_img - panel_h - margin_y
+    else:
+        # Default fallback tracking context token: "bottom_left"
+        x1 = margin_x
+        y1 = H_img - panel_h - margin_y
+
+    x2 = x1 + panel_w
+    y2 = y1 + panel_h
+
+    # 3. Render semi-transparent dark backdrop rectangle pane safely
+    backdrop = np.copy(frame)
+    cv2.rectangle(backdrop, (x1, y1), (x2, y2), (20, 20, 20), -1, lineType=cv2.LINE_AA)
+    cv2.addWeighted(backdrop, opacity, frame, 1.0 - opacity, 0, frame)
+
+    # Outer white perimeter hair-line border trim
+    cv2.rectangle(frame, (x1, y1), (x2, y2), (180, 180, 180), 1, lineType=cv2.LINE_AA)
+
+    # 4. Define structured legend item attributes (BGR color tuple, Label String)
+    legend_items = [
+        ((0, 255, 0), "True Positive (Perfect Decode Match)"),
+        ((0, 0, 255), "False Positive (Index Alignment Drift)"),
+        ((0, 165, 255), "Amber Node (Lattice Found, Skipped by Graph)"),
+        ((255, 0, 0), "Optical Miss (Hidden Baseline Target)"),
+        ((255, 0, 255), "True Negative (Expected Hardware Erasure)")
+    ]
+
+    # Text placement relative pointer calculations
+    start_x = x1 + 20
+    start_y = y1 + 25
+    line_spacing = 26
+
+    # 5. Stream tracking markers and label blocks straight onto the canvas sheet
+    for idx, (color_bgr, label_text) in enumerate(legend_items):
+        curr_y = start_y + (idx * line_spacing)
+
+        # Render a matching indicator marker circle matching the overlay specs
+        cv2.circle(frame, (start_x, curr_y - 4), 6, color_bgr, -1, lineType=cv2.LINE_AA)
+
+        # Print the corresponding descriptive legend text block
+        cv2.putText(frame,
+                    label_text,
+                    (start_x + 20, curr_y),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.40,
+                    (240, 240, 240),
+                    1,
+                    cv2.LINE_AA)
+
+    return frame
+
+
 def render_telemetry_grid_overlay(frame: np.ndarray,
                                   topological_matrix: np.ndarray,
                                   detected_points: np.ndarray,
@@ -409,7 +502,7 @@ def render_telemetry_grid_overlay(frame: np.ndarray,
                                   generator,
                                   camera,
                                   Rt: np.ndarray,
-                                  max_matching_dist_px: float = 4.0) -> np.ndarray:
+                                  legend_position = None, max_matching_dist_px: float = 4.0) -> np.ndarray:
     """
     Renders an inverted color-coded diagnostic geometric overlay by building a
     KD-Tree from raw detected points and sweeping across the ground-truth blueprint.
@@ -530,7 +623,203 @@ def render_telemetry_grid_overlay(frame: np.ndarray,
                           (int(detected_points[point_idx][0]) + 4, int(detected_points[point_idx][1]) + 4),
                           (0, 0, 255), -1, lineType=cv2.LINE_AA)
 
+    if legend_position is not None:
+        render_telemetry_legend_overlay(
+            frame=overlay_canvas,
+            position=legend_position,
+            opacity=0.8
+        )
     return overlay_canvas
+
+
+def save_test_case_markdown_report(case_name: str,
+                                   case_payload: dict,
+                                   metrics: dict,
+                                   output_dir: str = ".") -> None:
+    """
+    Generates and saves a comprehensive performance report in Markdown format,
+    documenting test case settings, camera configurations, and tracking yield scores.
+    Also exports a raw JSON sibling file for automated parsing.
+
+    Variables Description:
+        case_name (str)    : Unique name string of the verified test scenario block.
+        case_payload (dict): Ground-truth configurations dictionary containing camera params.
+        metrics (dict)     : Raw output dictionary from calculate_reconstruction_metrics.
+        output_dir (str)   : Target folder directory path to save the generated text report.
+
+    Returns:
+        None
+    """
+    # 1. Isolate the target paths cleanly
+    report_filename = os.path.join(output_dir, f"report_{case_name.lower()}.md")
+    json_filename = os.path.join(output_dir, f"report_{case_name.lower()}.json")
+
+    # 2. Extract operational metrics parameters safely
+    accuracy = metrics.get("accuracy", 0.0)
+    tp = metrics.get("true_positives", 0)
+    visible = metrics.get("total_visible_targets", 0)
+    misalignments = metrics.get("misalignments", 0)
+    skips = metrics.get("graph_skips", 0)
+    misses = metrics.get("optical_misses", 0)
+    ghosts = metrics.get("ghost_nodes", 0)
+    erasures = metrics.get("expected_erasures", 0)
+    leaks = metrics.get("erasure_leaks", 0)
+
+    # 3. Retrieve descriptive hardware simulation states
+    description = case_payload.get("description", "No scenario description provided.")
+    cam_params = case_payload.get("camera", {})
+
+    roll = cam_params.get("roll", 0.0)
+    pitch = cam_params.get("pitch", 0.0)
+    yaw = cam_params.get("yaw", 0.0)
+    tx = cam_params.get("tx", 0.0)
+    ty = cam_params.get("ty", 0.0)
+    tz = cam_params.get("tz", 0.0)
+
+    # Evaluate a clean visual indicator emoji matching the accuracy bounds
+    status_indicator = "[PASS]" if metrics.get("is_passed", False) else "[FAIL]"
+
+    # 4. Construct the complete Markdown layout string block
+    md_content = []
+    md_content.append(f"# Automated Test Verification Report: {case_name}")
+    md_content.append(f"**Execution Status:** {status_indicator} | **Final Decoding Accuracy:** {accuracy:.2f}%\n")
+
+    md_content.append("## Scenario Description")
+    md_content.append(f"{description}\n")
+
+    md_content.append("## Pattern Registration Performance Metrics")
+    md_content.append("| Metric Parameter Name | Checked Count | Evaluation Analysis Notes |")
+    md_content.append("| :--- | :--- | :--- |")
+    md_content.append(
+        f"| **True Positives (TP)** | {tp} | Successfully extracted, localized, and matches blueprint down to the single cell. |")
+    md_content.append(
+        f"| **Total Intended Visible Targets** | {visible} | Intended pattern grid targets visible within the active camera sensor boundaries. |")
+    md_content.append(
+        f"| **Index Alignment Drift (Misalignments)** | {misalignments} | Decoded matrix row/column cells that shifted away from ground-truth slots. |")
+    md_content.append(
+        f"| **Graph Traversal Skips (Slips)** | {skips} | Geometric blobs extracted from video frames but skipped by wave-growth engine. |")
+    md_content.append(
+        f"| **Pure Optical Misses** | {misses} | Core blueprint dots inside view limits that failed the thresholding blob detector. |")
+    md_content.append(
+        f"| **Phantom Noise Artifacts (Ghosts)** | {ghosts} | Spurious noise blobs registered by camera that do not exist on the master template. |")
+    md_content.append(
+        f"| **Expected Erasures (True Negatives)** | {erasures} | Hardware-level missing spots or mask holes correctly bypassed by the tracker. |")
+    md_content.append(
+        f"| **Erasure Glare Leaks** | {leaks} | Noise spots inside erasure zones that mistakenly triggered feature detections. |")
+    md_content.append("")
+
+    md_content.append("## Camera Simulation Extrinsics & Position Parameters")
+    md_content.append("| Transformation Axis | Simulated Value Input | Geometric Spatial Unit |")
+    md_content.append("| :--- | :--- | :--- |")
+    md_content.append(f"| **Camera Roll Rotation** | {roll:.2f} | Degrees (Counter-Clockwise Phase) |")
+    md_content.append(f"| **Camera Pitch Tilt** | {pitch:.2f} | Degrees (Forward Perspective Foreshortening) |")
+    md_content.append(f"| **Camera Yaw Angle** | {yaw:.2f} | Degrees (Sideways Panoramic Drift) |")
+    md_content.append(f"| **Translation Vector X (tx)** | {tx:.2f} | mm (Horizontal Camera Sensor Offset) |")
+    md_content.append(f"| **Translation Vector Y (ty)** | {ty:.2f} | mm (Vertical Camera Sensor Offset) |")
+    md_content.append(f"| **Translation Vector Z (tz)** | {tz:.2f} | mm (Lens Distance focal height clearance) |")
+    md_content.append(
+        f"\n***\n*Report automatically compiled and serialized by {ENGINE_FULL_NAME}.*")
+
+    # 5. Write the compiled text report to disk safely
+    with open(report_filename, 'w', encoding='ascii') as f:
+        f.write("\n".join(md_content) + "\n")
+
+    # 6. Sibling Output: Export structured JSON for database serialization or multi-frame chart logging
+    structured_log = {
+        "case_name": case_name,
+        "description": description,
+        "metrics": metrics,
+        "camera_parameters": cam_params
+    }
+    with open(json_filename, 'w', encoding='ascii') as fj:
+        json.dump(structured_log, fj, indent=4)
+
+    print(f" -> [LOGGED]: Compiled Markdown report successfully saved to: {report_filename}")
+    print(f" -> [LOGGED]: Automated JSON sibling data successfully saved to: {json_filename}")
+
+
+def save_summary_markdown_report(results_dict: dict,
+                                 output_dir: str = ".") -> None:
+    """
+    Compiles a structured dictionary of test case results into a unified
+    master Markdown summary matrix table dashboard file.
+
+    Variables Description:
+        results_dict (dict) : Map of case profiles where the case name key tracks
+                              the complete metrics configuration dictionary directly:
+                              {
+                                "CLEAN_BASELINE": {
+                                    "description": "Prinstine tracking run",
+                                    "accuracy": 100.0,
+                                    "true_positives": 841,
+                                    ...
+                                }, ...
+                              }
+        output_dir (str)    : Target folder path destination to save the summary file.
+
+    Returns:
+        None
+    """
+    summary_filename = os.path.join(output_dir, "summary_report.md")
+
+    # 1. Build the formalized Markdown table header configuration
+    md_content = []
+    md_content.append("# Pattern Registration Performance Summary")
+
+    md_content.append("| Case Name | Scenario Comment Description | Visible Targets | Recall | Precision | Status |")
+    md_content.append("| :--- | :--- | :---: | :---: | :---: | :---: |")
+
+    total_cases = len(results_dict)
+    passed_cases = 0
+
+    # 2. Iterate across the results dictionary keys to populate specific row slots
+    for case_name, metrics in results_dict.items():
+        # Dynamically extract description straight from the metrics array dictionary
+        comment = metrics.get("description", "No description profile recorded.")
+
+        # Isolate parameters needed for standard statistical calculations
+        tp = metrics.get("true_positives", 0)
+        visible = metrics.get("total_visible_targets", 0)
+        misalignments = metrics.get("misalignments", 0)
+        ghosts = metrics.get("ghost_nodes", 0)
+        accuracy = metrics.get("accuracy", 0.0)
+
+        # 3. Compute mathematically precise Recall and Precision ratios
+        # Recall: How many of the visible blueprint dots did the decoder capture?
+        recall_pct = (tp / visible) * 100.0 if visible > 0 else 0.0
+
+        # Precision: Out of all nodes written to canvas, how many are correct?
+        total_extracted_pool = tp + misalignments + ghosts
+        precision_pct = (tp / total_extracted_pool) * 100.0 if total_extracted_pool > 0 else 0.0
+
+        # Evaluate status threshold signatures
+        is_passed = metrics.get("is_passed", False)
+        status_tag = "PASS" if is_passed else "FAIL"
+
+        if is_passed:
+            passed_cases += 1
+
+        # Append row format block string data line directly
+        md_content.append(
+            f"| **{case_name}** | {comment} | {visible} | {recall_pct:.2f}% | {precision_pct:.2f}% | {status_tag} |"
+        )
+
+    # 4. Append high-level global system telemetry metrics
+    md_content.append("\n## System Conformance Evaluation Analytics")
+    md_content.append(f"- **Total Simulated Test Cases Checked:** {total_cases}")
+    md_content.append(f"- **Total Successfully Passed Suites :** {passed_cases} / {total_cases}")
+
+    if total_cases > 0:
+        yield_score = (passed_cases / total_cases) * 100.0
+        md_content.append(f"- **Global Framework Compliance Index:** {yield_score:.2f}%")
+
+    md_content.append(f"\n***\n*Generated automatically by {ENGINE_FULL_NAME}*")
+
+    # 5. Output the finalized text document stream to disk safely
+    with open(summary_filename, 'w', encoding='ascii') as f:
+        f.write("\n".join(md_content) + "\n")
+
+    return summary_filename
 
 
 if __name__ == "__main__":
@@ -630,6 +919,10 @@ if __name__ == "__main__":
             "intrinsics":{ "f_px": 1150.0, "k1" : K1, "width_px": IMG_SHAPE[1],"height_px": IMG_SHAPE[0]}
         }
 
+    RESULT_DIR = "./test_results_log"
+    if not os.path.exists(RESULT_DIR):
+        os.makedirs(RESULT_DIR)
+    accumulated_metrics_dictionary = {}
     print("=======================================================")
     print("Launching Universal Telemetry Evaluation Loop Sweep...")
     print(f"Image Export Policy: {'ENABLED' if args.save_images else 'DISABLED'}")
@@ -646,11 +939,27 @@ if __name__ == "__main__":
             save_images=args.save_images
         )
 
+        # Export the detailed markdown file report automatically right at the finish line
+        save_test_case_markdown_report(
+            case_name=case_name,
+            case_payload=case_payload,
+            metrics=result,
+            output_dir="./test_results_log"
+        )
+
+        accumulated_metrics_dictionary[case_name] = result
+
         if result["status"] != "success":
             print(f" -> [WARNING] Subgraph decoder was unable to find phase lock consensus.")
             continue
         if not args.save_images:
             print(f" -> Metrics: accuracy={result['accuracy']:.2f}%, True Positives={result['true_positives']} from total visible {result['total_visible_targets']}")
+
+    summary_filename = save_summary_markdown_report(results_dict=accumulated_metrics_dictionary, output_dir=RESULT_DIR)
+    if len(summary_filename) > 0:
+        print(f" -> [LOGGED]: Summary table successfully written to: {summary_filename}")
+    else:
+        print(f" -> [WARNING]: Summary table saving is failed")
 
     print("\n=======================================================")
     print("UNIVERSAL INTEGRATION METRICS SWEEP FULLY RUN!")

@@ -6,6 +6,8 @@ from crystal import reconstruct_mesh
 from matcher import localize_grid
 from lattice_topology import *
 from generate import generate_triangular_gray_grid
+from optimization import calibrate_camera
+from camera import ProjectiveCamera
 from pathlib import Path
 
 
@@ -350,3 +352,7 @@ if __name__ == "__main__":
     print(topological_matrix)
     mapped_labels = map_matrix_indices(topological_matrix, labels)
     print(mapped_labels)
+    H, W = img.shape[:2]
+    cam = ProjectiveCamera((width, height), f_px=(W+H)/4, cx=W/2, cy=H/2, k1=-1.e-7)
+    result = calibrate_camera(topological_matrix, pts, cam)
+    print(result)
