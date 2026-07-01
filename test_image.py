@@ -311,41 +311,42 @@ def evaluate_single_integration_case(base_blueprint: np.ndarray,
     if save_images:
         output_filename = f"synthetic_shot_{case_name}.png"
         cv2.imwrite(output_filename, img)
-        print(f" -> Export Complete: Saved output image array to '{output_filename}'")
-        metrics = {"status": "success", "message": "save_only"}
-    else:
-        # 5. Adjust reference blueprint targets for out-of-frame boundary clipping
-        visible_blueprint = compute_visible_blueprint(
-            base_blueprint=blueprint,
-            generator=generator,
-            camera=cam_obj,
-            Rt=Rt
-        )
+        print(f" -> Export Complete: Saved original image to '{output_filename}'")
 
-        pts, labels = detect_and_classify_grid_nodes(img)
+    # Adjust reference blueprint targets for out-of-frame boundary clipping
+    visible_blueprint = compute_visible_blueprint(
+        base_blueprint=blueprint,
+        generator=generator,
+        camera=cam_obj,
+        Rt=Rt
+    )
+
+    pts, labels = detect_and_classify_grid_nodes(img)
+    if save_images:
         visualize_detections(img, pts, labels)
-        topological_matrix = np.full(blueprint.shape, -1, dtype=np.int32)
-        if len(pts) > 0:
-            matches_islands = reconstruct_mesh(pts, labels)
-            for island in matches_islands:
-                island_label_map = map_matrix_indices(island, labels)
-                match_result = localize_grid(island_label_map, base_blueprint.shape[1], base_blueprint.shape[0])
-                if match_result is not None:
-                    map_island_indices_to_blueprint(island, match_result, topological_matrix)
+    topological_matrix = np.full(blueprint.shape, -1, dtype=np.int32)
+    if len(pts) > 0:
+        matches_islands = reconstruct_mesh(pts, labels)
+        for island in matches_islands:
+            island_label_map = map_matrix_indices(island, labels)
+            match_result = localize_grid(island_label_map, base_blueprint.shape[1], base_blueprint.shape[0])
+            if match_result is not None:
+                map_island_indices_to_blueprint(island, match_result, topological_matrix)
+                if save_images:
                     visualize_reconstructed_grid(img, island, pts)
 
-            wiped_points_num = verify_and_cleanse_topological_matrix(
-                topological_matrix,
-                base_blueprint, labels)
-            np.set_printoptions(threshold=np.inf, linewidth=200)
-            print("original")
-            print(visible_blueprint)
-            print("restored")
-            print(map_matrix_indices(topological_matrix, labels))
+        wiped_points_num = verify_and_cleanse_topological_matrix(
+            topological_matrix,
+            base_blueprint, labels)
+        np.set_printoptions(threshold=np.inf, linewidth=200)
+        print("original")
+        print(visible_blueprint)
+        print("restored")
+        print(map_matrix_indices(topological_matrix, labels))
 
+    if save_images:
         output_filename = f"synthetic_shot_{case_name}_result.png"
         cv2.imwrite(output_filename, img)
-
         # Generate the color-coded true-positive metric diagnostic overlay
         debug_overlay = render_telemetry_grid_overlay(
             frame=None,
@@ -358,26 +359,25 @@ def evaluate_single_integration_case(base_blueprint: np.ndarray,
             Rt=Rt,
             legend_position = "bottom_right"
         )
-
         # Save the diagnostic visualization matrix directly to disk
         diagnostic_filename = f"diagnostic_overlay_{case_name}.png"
         cv2.imwrite(diagnostic_filename, debug_overlay)
         print(f" -> Diagnostic Telemetry Complete: Exported visual debug overlay to '{diagnostic_filename}'")
 
-        # 8. Process accuracy metrics against our updated visible blueprint mask
-        metrics = calculate_reconstruction_metrics(
-            topological_matrix=topological_matrix,
-            detected_points=pts,  # Ensure your script extracts and forwards this array
-            base_blueprint=base_blueprint,
-            modified_blueprint=blueprint,
-            generator=generator,
-            camera=cam_obj,
-            Rt=Rt
-        )
+    # 8. Process accuracy metrics against our updated visible blueprint mask
+    metrics = calculate_reconstruction_metrics(
+        topological_matrix=topological_matrix,
+        detected_points=pts,  # Ensure your script extracts and forwards this array
+        base_blueprint=base_blueprint,
+        modified_blueprint=blueprint,
+        generator=generator,
+        camera=cam_obj,
+        Rt=Rt
+    )
 
-        metrics["status"] = "success"
-        metrics["case_name"] = case_name
-        metrics["description"] = case_payload["description"]
+    metrics["status"] = "success"
+    metrics["case_name"] = case_name
+    metrics["description"] = case_payload["description"]
 
     return metrics
 
@@ -842,8 +842,8 @@ if __name__ == "__main__":
     DEFAULT_TX = 0
     DEFAULT_TY = 0
     IMG_SHAPE = (1080, 1920)
-    K1 = -1.5e-7
-
+    K1 = -0.25
+    INTRINSICS = {"f_px": 1150.0, "k1": K1, "width_px": IMG_SHAPE[1], "height_px": IMG_SHAPE[0]}
     base_blueprint = generate_triangular_gray_grid(width_nodes=W_NODES, height_nodes=H_NODES)
     # Define your centralized parametric evaluation dictionary matrix block
     cases = {
@@ -851,25 +851,25 @@ if __name__ == "__main__":
             "description": "Pristine Baseline Frame (Standard Centered Orientation)",
             "blueprint": np.copy(base_blueprint),
             "camera": {"roll": 0.0, "pitch": 0.0, "yaw": -1.0, "tx": DEFAULT_TX, "ty": DEFAULT_TY, "tz": Z_DISTANCE},
-            "intrinsics": {"f_px": 1150.0, "k1": K1, "width_px": IMG_SHAPE[1], "height_px": IMG_SHAPE[0]}
+            "intrinsics": INTRINSICS
         },
         "erasures": {
             "description": "15% Missing Node Dropouts (Standard Centered Orientation)",
             "blueprint": inject_matrix_erasures(base_blueprint, erasure_probability=0.15),
             "camera": {"roll": 0.0, "pitch": 0.0, "yaw": -1.0, "tx": DEFAULT_TX, "ty": DEFAULT_TY, "tz": Z_DISTANCE},
-            "intrinsics": {"f_px": 1150.0, "k1": K1, "width_px": IMG_SHAPE[1], "height_px": IMG_SHAPE[0]}
+            "intrinsics": INTRINSICS
         },
         "bitflips": {
             "description": "5% Random Bit Flip Threshold Noise (Standard Centered Orientation)",
             "blueprint": inject_matrix_bit_flips(base_blueprint, flip_probability=0.05),
             "camera": {"roll": 0.0, "pitch": 0.0, "yaw": -1.0, "tx": DEFAULT_TX, "ty": DEFAULT_TY, "tz": Z_DISTANCE},
-            "intrinsics": {"f_px": 1150.0, "k1": K1, "width_px": IMG_SHAPE[1], "height_px": IMG_SHAPE[0]}
+            "intrinsics": INTRINSICS
         },
         "cropped": {
             "description": "Partial Viewport Aperture Geometric Crop (Standard Centered Orientation)",
             "blueprint": apply_geometric_aperture_crop(base_blueprint, center_row_pct=0.4, center_col_pct=0.4, radius_pct=0.25),
             "camera": {"roll": 0.0, "pitch": 0.0, "yaw": -1.0, "tx": DEFAULT_TX, "ty": DEFAULT_TY, "tz": Z_DISTANCE},
-            "intrinsics": {"f_px": 1150.0, "k1": K1, "width_px": IMG_SHAPE[1], "height_px": IMG_SHAPE[0]}
+            "intrinsics": INTRINSICS
         },
         "rotated_45_roll": {
             "description": "Severe 45-Degree Roll Rotation Around Optical Axis",
@@ -877,7 +877,7 @@ if __name__ == "__main__":
             # Severe roll skew applied around the optical Z-axis with an alternative translation offset
             "camera": {"roll": 45.0, "pitch": 0.0, "yaw": 0.0, "tx": DEFAULT_TX * 0.8, "ty": DEFAULT_TY * 0.8,
                        "tz": Z_DISTANCE * 1.2},
-            "intrinsics": {"f_px": 1150.0, "k1": K1, "width_px": IMG_SHAPE[1], "height_px": IMG_SHAPE[0]}
+            "intrinsics": INTRINSICS
 
         },
         "extreme_stress": {
@@ -885,7 +885,7 @@ if __name__ == "__main__":
             "blueprint": inject_matrix_erasures(base_blueprint, erasure_probability=0.10),
             "camera": {"roll": 45.0, "pitch": 15.0, "yaw": -10.0, "tx": DEFAULT_TX * 0.9, "ty": DEFAULT_TY * 1.1,
                        "tz": Z_DISTANCE * 0.95},
-            "intrinsics": {"f_px": 1150.0, "k1": K1, "width_px": IMG_SHAPE[1], "height_px": IMG_SHAPE[0]}
+            "intrinsics": INTRINSICS
 
         },
         "multi_island_stitch": {
@@ -895,7 +895,7 @@ if __name__ == "__main__":
                 "roll": 30.0, "pitch": 5.0, "yaw": -2.0,
                 "tx": DEFAULT_TX, "ty": DEFAULT_TY, "tz": Z_DISTANCE
             },
-            "intrinsics": {"f_px": 1150.0, "k1": K1, "width_px": IMG_SHAPE[1], "height_px": IMG_SHAPE[0]}
+            "intrinsics": INTRINSICS
         },
         "severe_pitch_tilt_45deg": {
             "description": "Severe 45-Degree Camera Pitch Foreshortening Stress Test",
@@ -904,7 +904,7 @@ if __name__ == "__main__":
                 "roll": 0.0, "pitch": 45.0, "yaw": 0.0,
                 "tx": DEFAULT_TX, "ty": DEFAULT_TY, "tz": Z_DISTANCE * 0.9  # Pushed closer to retain pixel scale
             },
-            "intrinsics": {"f_px": 1150.0, "k1": K1, "width_px": IMG_SHAPE[1], "height_px": IMG_SHAPE[0]}
+            "intrinsics": INTRINSICS
         }
     }
 
@@ -916,7 +916,7 @@ if __name__ == "__main__":
             "blueprint": np.copy(base_blueprint),
             "camera": {"roll": target_roll, "pitch": 0.0, "yaw": 0.0, "tx": DEFAULT_TX, "ty": DEFAULT_TY,
                        "tz": Z_DISTANCE},
-            "intrinsics":{ "f_px": 1150.0, "k1" : K1, "width_px": IMG_SHAPE[1],"height_px": IMG_SHAPE[0]}
+            "intrinsics": INTRINSICS
         }
 
     RESULT_DIR = "./test_results_log"
@@ -924,7 +924,7 @@ if __name__ == "__main__":
         os.makedirs(RESULT_DIR)
     accumulated_metrics_dictionary = {}
     print("=======================================================")
-    print("Launching Universal Telemetry Evaluation Loop Sweep...")
+    print("Launching Telemetry Evaluation Loop Sweep...")
     print(f"Image Export Policy: {'ENABLED' if args.save_images else 'DISABLED'}")
     print("=======================================================")
 
@@ -952,8 +952,7 @@ if __name__ == "__main__":
         if result["status"] != "success":
             print(f" -> [WARNING] Subgraph decoder was unable to find phase lock consensus.")
             continue
-        if not args.save_images:
-            print(f" -> Metrics: accuracy={result['accuracy']:.2f}%, True Positives={result['true_positives']} from total visible {result['total_visible_targets']}")
+        print(f" -> Metrics: accuracy={result['accuracy']:.2f}%, True Positives={result['true_positives']} from total visible {result['total_visible_targets']}")
 
     summary_filename = save_summary_markdown_report(results_dict=accumulated_metrics_dictionary, output_dir=RESULT_DIR)
     if len(summary_filename) > 0:
@@ -962,5 +961,5 @@ if __name__ == "__main__":
         print(f" -> [WARNING]: Summary table saving is failed")
 
     print("\n=======================================================")
-    print("UNIVERSAL INTEGRATION METRICS SWEEP FULLY RUN!")
+    print("INTEGRATION METRICS FULLY RUN!")
     print("=======================================================")

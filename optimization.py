@@ -164,91 +164,6 @@ def compute_homogeneous_vanishing_point(line_vectors: list) -> np.ndarray:
     return v_point
 
 
-def solve_zhang_intrinsic_matrix_4axis_clean(Vu: np.ndarray,
-                                             Vv: np.ndarray,
-                                             Vw: np.ndarray,
-                                             V_vert: np.ndarray) -> dict:
-    """
-    Analytically solves for the complete intrinsic camera matrix K (fx, fy, cx, cy) from
-    four pre-computed homogeneous vanishing points in projective space P^2.
-
-    Combines the 3 barycentric axes (60 deg) and the vertical sub-grid axis (90 deg).
-    Fully ASCII-compliant implementation.
-
-    Variables Description:
-        Vu, Vv, Vw (np.ndarray): Homogeneous vanishing points for the barycentric axes, shape (3,).
-        V_vert (np.ndarray)    : Homogeneous vanishing point for the vertical 90-degree axis, shape (3,).
-
-    Returns:
-        dict: Standardized calibration results registry.
-    """
-    # 1. Protection Gate: Ensure all required vanishing vectors are populated
-    if any(v is None for v in [Vu, Vv, Vw, V_vert]):
-        return {
-            "status": "failed",
-            "message": "Degenerated spatial configuration: Missing independent vanishing points."
-        }
-
-    # 2. Unpack homogeneous coordinates [x, y, w]^T for all 4 tracking axes
-    xu, yu, wu = Vu
-    xv, yv, wv = Vv
-    xw, yw, ww = Vw
-    x_v, y_v, w_v = V_vert
-
-    # 3. Construct the complete 3x3 linear DLT constraint matrix
-    # Row 1: The 90-degree orthogonal constraint (u axis and vertical axis inner product)
-    # Row 2 & 3: Linearized combinations of the 60-degree barycentric pairs
-    A_mat = np.array([
-        [xu * w_v + x_v * wu, yu * w_v + y_v * wu, wu * w_v],
-        [xu * wv + xv * wu, yu * wv + yv * wu, wu * wv],
-        [xv * ww + xw * wv, yv * ww + yw * wv, wv * ww]
-    ], dtype=np.float32)
-
-    b_vec = -np.array([
-        xu * x_v + yu * y_v,
-        xu * xv + yu * yv,
-        xv * xw + yv * yw
-    ], dtype=np.float32)
-
-    # 4. Solve the full linear system for h = [-cx, -cy, cx^2 + cy^2 + f^2]^T
-    try:
-        # Condition guard to filter out flat views where columns become linearly dependent
-        if np.linalg.cond(A_mat) > 1e4:
-            return {
-                "status": "failed",
-                "message": "Degenerated spatial configuration: Near-parallel matrix rank collapse."
-            }
-
-        h = np.linalg.solve(A_mat, b_vec)
-        cx_solved = float(-h[0])
-        cy_solved = float(-h[1])
-
-        f_sq = float(h[2] - (cx_solved ** 2 + cy_solved ** 2))
-
-        if f_sq <= 0:
-            return {
-                "status": "failed",
-                "message": "Degenerated spatial configuration: Imaginary focal parameters resolved."
-            }
-
-        f_solved = float(np.sqrt(f_sq))
-
-        return {
-            "status": "success",
-            "fx": f_solved,
-            "fy": f_solved,
-            "cx": cx_solved,
-            "cy": cy_solved,
-            "message": "Calibration matrix parameters successfully extracted via 4-axis orthogonality equations."
-        }
-
-    except np.linalg.LinAlgError:
-        return {
-            "status": "failed",
-            "message": "Degenerated spatial configuration: Matrix is numerically singular."
-        }
-
-
 def solve_weak_perspectivity_matrix(vp: list) -> dict:
     """
     Analytically computes camera intrinsics using a line homography.
@@ -505,7 +420,9 @@ def calibrate_single_frame_zhang_menger(topological_matrix: np.ndarray,
         return {"status": "failed", "message": "Insufficient line density harvested."}
 
     node_weights = np.ones(len(detected_points), dtype=np.float32)
-    state = { "shape" : camera_object.img_shape, "f" : camera_object.f_px, "cx" : camera_object.cx, "cy" : camera_object.cy }
+    state = { "shape" : camera_object.img_shape,
+              "f" : camera_object.f_px, "cx" : camera_object.cx, "cy" : camera_object.cy,
+              "mode" : "perspective"}
     # =====================================================================
     # DYNAMIC LOSS CLOSURE: EMBEDDING ZHANG INSIDE THE MENGER LOOP
     # =====================================================================
@@ -518,7 +435,7 @@ def calibrate_single_frame_zhang_menger(topological_matrix: np.ndarray,
         # Apply proposed distortion factor to the active camera instance
         # Generate un-distorted coordinates strictly matching this candidate k1 curve step
         modified_cam = ProjectiveCamera(state["shape"], state["f"], state["cx"], state["cy"],
-                                        k1_proposed)
+                                        k1_proposed, state["mode"])
         corrected_points = modified_cam.undistort_points(detected_points)
         u_eqs = [compute_homogeneous_line(ln, corrected_points) for ln in u_lines]
         v_eqs = [compute_homogeneous_line(ln, corrected_points) for ln in v_lines]
@@ -529,11 +446,10 @@ def calibrate_single_frame_zhang_menger(topological_matrix: np.ndarray,
         Vv = compute_homogeneous_vanishing_point(v_eqs)
         Vw = compute_homogeneous_vanishing_point(w_eqs)
         Vh = compute_homogeneous_vanishing_point(h_eqs)
-        print(Vu, Vv, Vw, Vh)
-        #result = solve_zhang_intrinsic_matrix([Vu,Vv,Vw,Vh])
+        print("vanishing points: ",Vu, Vv, Vw, Vh)
         result = solve_weak_perspectivity_matrix([Vu,Vv,Vw,Vh])
-        #result = solve_zhang_intrinsic_matrix_4axis_clean(Vu, Vv, Vw, Vh)
         if result["status"] == "success":
+            print(result)
             # Assign the freshly solved analytical intrinsics to the camera instance
             modified_cam = ProjectiveCamera(state["shape"], result["fx"], state["cx"], state["cy"], k1_proposed, result["mode"])
         else:
@@ -548,8 +464,7 @@ def calibrate_single_frame_zhang_menger(topological_matrix: np.ndarray,
         )
 
         state["f"] = modified_cam.f_px
-        #state["cx"] = modified_cam.cx
-        #state["cy"] = modified_cam.cy
+        state["mode"] = modified_cam.mode
         # Restore camera state for thread-isolation safety
         return loss_val
 
@@ -567,6 +482,7 @@ def calibrate_single_frame_zhang_menger(topological_matrix: np.ndarray,
     # --- FINAL IN-PLACE SYSTEM INTRINSIC MUTATION ---
     if opt_res.success:
         camera_object.k1 = opt_res.x[0]
+        camera_object.mode = state["mode"]
         camera_object.f_px = state["f"]
         camera_object.cx = state["cx"]
         camera_object.cy = state["cy"]
@@ -579,7 +495,8 @@ def calibrate_single_frame_zhang_menger(topological_matrix: np.ndarray,
 
     return {
         "status": "success" if opt_res.success else "failed",
-        "focal_f": camera_object.f_px,
+        "mode" : camera_object.mode,
+        "f_px": camera_object.f_px,
         "cx": camera_object.cx,
         "cy": camera_object.cy,
         "radial_k1": camera_object.k1,
@@ -683,123 +600,3 @@ def harvest_hexagonal_line_bundles(topological_matrix: np.ndarray,
 
     # Return 4 independent structural vectors directly as a decoupled tuple
     return u_lines, v_lines, w_lines, r_lines
-
-
-def calibrate_camera(topological_matrix: np.ndarray,
-                                     detected_points: np.ndarray,
-                                     camera_object,
-                                     options_dict: dict = None) -> dict:
-    """
-    Orchestrates the entire lens calibration routine by re-using standalone
-    harvest_hexagonal_line_bundles and menger_curvature_loss functions.
-    Directly optimizes the provided ProjectiveCamera object's parameters
-    and modifies its internal state fields in-place upon convergence.
-
-    Variables Description:
-        topological_matrix (np.ndarray): Decoded tracking map lookup framework, shape (H, W).
-                                         Maps matrix slots to sub-pixel point IDs.
-                                         Empty tracking voids carry -1 tokens.
-        detected_points (np.ndarray)   : Raw 2D sub-pixel coordinates from blob finder, shape (N, 2).
-        camera_object (obj)            : Instance of ProjectiveCamera from your camera module.
-                                         Must have attributes .f, .k1, .cx, .cy and
-                                         a method .undistort_points() or equivalent.
-        options_dict (dict)            : Optional parameters for the SciPy optimization simplex.
-
-    Returns:
-        dict: Solved parameters, final loss metric, and optimizer convergence metadata.
-    """
-    grid_lines_u, grid_lines_v, grid_lines_w = harvest_hexagonal_line_bundles(topological_matrix)
-    grid_lines_bundle = grid_lines_u + grid_lines_v + grid_lines_w
-    num_detected_blobs = len(detected_points)
-    node_weights = np.ones(num_detected_blobs, dtype=np.float32)
-    center_cx_cy = (camera_object.cx, camera_object.cy)
-
-    print("=== INITIATING DRY-REUSED CAMERA MENGER OPTIMIZATION ===")
-    print(f" -> Total Straight Line Bundles Harvested: {len(grid_lines_bundle)}")
-    print(f" -> Current Camera Focal Length (f)     : {camera_object.f_px:.2f}")
-    print(f" -> Current Camera Distortion (k1)       : {camera_object.k1:.6f}")
-
-    if len(grid_lines_bundle) < 5:
-        return {
-            "status": "failed",
-            "message": "Insufficient straight lines harvested to reliably guide optimization.",
-            "final_f": camera_object.f_px, "final_k1": camera_object.k1
-        }
-
-    # 2. DEFINE THE ADAPTER WRAPPER CLOSURE FOR OBJECT MUTATION
-    def camera_objective_adapter(params):
-        """Bridge closure mapping optimization parameters back onto the active camera object."""
-        f_proposed, k1_proposed = float(params[0]), float(params[1])
-
-        # Guard wall: Enforce absolute minimal physical constraints on focal length
-        if f_proposed < 100.0:
-            return 1e10
-
-        # Temporarily back up original parameters for thread isolation hygiene
-        orig_f, orig_k1 = camera_object.f_px, camera_object.k1
-
-        # Assign proposed parameters to object fields to feed native .undistort_points()
-        camera_object.f = f_proposed
-        camera_object.k1 = k1_proposed
-
-        # Invoke the re-used core loss function pass
-        # Instead of writing custom inline math, it triggers the standalone loss engine
-        loss_val = menger_curvature_loss(
-            params=[f_proposed, k1_proposed],
-            points_2d=detected_points,
-            lines=grid_lines_bundle,
-            weights=node_weights,
-            center=center_cx_cy,
-            undistort_func=lambda pts, f, k, c: camera_object.undistort_points(pts)
-        )
-
-        # Restore camera state safely until the final convergence checkpoint
-        camera_object.f = orig_f
-        camera_object.k1 = orig_k1
-
-        return loss_val
-
-    # Evaluate the starting geometric error footprint before optimization triggers
-    x0_initial = np.array([camera_object.f_px, camera_object.k1], np.float32)
-    initial_loss = camera_objective_adapter(x0_initial)
-
-    print(f" -> Initial Menger Curvature Residual Cost : {initial_loss:.4e}")
-
-    # =====================================================================
-    # STAGE 3: EXECUTE THE CLOSED-LOOP NUMERICAL MINIMIZER
-    # =====================================================================
-    opt_settings = {'xatol': 1e-4, 'fatol': 1e-4, 'maxiter': 500}
-    if options_dict is not None:
-        opt_settings.update(options_dict)
-
-    print(" -> Executing Nelder-Mead optimization simplex over camera object parameter space...")
-    opt_res = scipy.optimize.minimize(
-        fun=camera_objective_adapter,
-        x0=x0_initial,
-        method='Nelder-Mead',
-        options=opt_settings
-    )
-
-    f_optimized, k1_optimized = opt_res.x
-    final_loss = opt_res.fun
-
-    # Apply the final optimized parameters back onto your working camera instance
-    if opt_res.success or final_loss < initial_loss:
-        camera_object.f_px = float(f_optimized)
-        camera_object.k1 = float(k1_optimized)
-        print(" -> In-place state update: ProjectiveCamera parameters modified successfully.")
-
-    print(f" -> Optimization Convergence Match : {'SUCCESS' if opt_res.success else 'FAILED'}")
-    print(f" -> Final Curvature Residual Cost  : {final_loss:.4e} (Delta: {initial_loss - final_loss:.4e})")
-    print(f" -> Solved Camera Focal Length (f) : {camera_object.f_px:.4f} pixels")
-    print(f" -> Solved Camera Distortion (k1)  : {camera_object.k1:.8f}")
-
-    return {
-        "status": "success" if opt_res.success else "converged_with_warnings",
-        "optimizer_message": str(opt_res.message),
-        "final_f": camera_object.f,
-        "final_k1": camera_object.k1,
-        "initial_loss": float(initial_loss),
-        "final_loss": float(final_loss),
-        "iterations": int(opt_res.nit)
-    }

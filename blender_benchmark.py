@@ -15,6 +15,8 @@ PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 from blender_factory import *
+from camera import *
+
 # ==============================================================================
 # [INSERT YOUR PhysicalMeshGenerator CLASS CODE HERE]
 # ==============================================================================
@@ -477,39 +479,6 @@ def configure_camera(scene,
     bpy.context.view_layer.update()
 
 
-def apply_radial_distortion(x_px, y_px, cx_px, cy_px, f_px, k1):
-    """
-    Applies the mathematical Brown-Conrady radial distortion model (K1 only)
-    to a single 2D pixel coordinate point.
-    """
-    # 1. Move to normalized camera coordinates space (x, y)
-    x_norm = (x_px - cx_px) / f_px
-    y_norm = (y_px - cy_px) / f_px
-
-    # Calculate square of radius from principal axis point center
-    r2 = (x_norm ** 2) + (y_norm ** 2)
-
-    # 2. Compute distortion scaling factor
-    distortion_multiplier = 1.0 + k1 * r2
-
-    # 3. Map back to absolute canvas screen pixels
-    x_distorted = (x_norm * distortion_multiplier * f_px) + cx_px
-    y_distorted = (y_norm * distortion_multiplier * f_px) + cy_px
-
-    return x_distorted, y_distorted
-
-
-class Distortion:
-    def __init__(self, cx_px, cy_px, f_px, k1):
-        self.cx = cx_px
-        self.cy = cy_px
-        self.f = f_px
-        self.k1 = k1
-
-    def __call__(self, x_px, y_px):
-        return  apply_radial_distortion(x_px, y_px, self.cx, self.cy, self.f, self.k1)
-
-
 def export_ground_truth_labels(scene, camera_obj, pattern_obj, node_centers_3d, grid_matrix, distort:Distortion, filepath):
     """
     Computes exact sub-pixel screen space projections for each underlying 3D 
@@ -533,7 +502,7 @@ def export_ground_truth_labels(scene, camera_obj, pattern_obj, node_centers_3d, 
         
         shape_type = grid_matrix[r, c]
         if distort:
-            pixel_x, pixel_y = distort(pixel_x, pixel_y)
+            pixel_x, pixel_y = distort((pixel_x, pixel_y))
         gt_lines.append(f"{r},{c},{shape_type},{pixel_x:.4f},{pixel_y:.4f}")
         
     with open(filepath, "w") as f:

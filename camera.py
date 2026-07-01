@@ -1,5 +1,40 @@
 import numpy as np
 
+def apply_radial_distortion(x_px, y_px, cx_px, cy_px, f_px, k1):
+    """
+    Applies the mathematical Brown-Conrady radial distortion model (K1 only)
+    to a single 2D pixel coordinate point.
+    """
+    # 1. Move to normalized camera coordinates space (x, y)
+    x_norm = (x_px - cx_px) / f_px
+    y_norm = (y_px - cy_px) / f_px
+
+    # Calculate square of radius from principal axis point center
+    r2 = (x_norm ** 2) + (y_norm ** 2)
+
+    # 2. Compute distortion scaling factor
+    distortion_multiplier = 1.0 + k1 * r2
+
+    # 3. Map back to absolute canvas screen pixels
+    x_distorted = (x_norm * distortion_multiplier * f_px) + cx_px
+    y_distorted = (y_norm * distortion_multiplier * f_px) + cy_px
+
+    return x_distorted, y_distorted
+
+
+class Distortion:
+    def __init__(self, cx_px, cy_px, f_px, k1):
+        self.cx = cx_px
+        self.cy = cy_px
+        self.f = f_px
+        self.k1 = k1
+
+    def __call__(self, point):
+        is_point = isinstance(point, tuple)
+        if is_point:
+            return apply_radial_distortion(point[0], point[1], self.cx, self.cy, self.f, self.k1)
+        else:
+            return [apply_radial_distortion(x_px, y_px, self.cx, self.cy, self.f, self.k1) for x_px, y_px in point]
 
 def compute_max_radius(distortion_model, cx, cy, img_shape=(1080, 1920)):
     """
@@ -7,32 +42,25 @@ def compute_max_radius(distortion_model, cx, cy, img_shape=(1080, 1920)):
     Returns the exact radius right before the polynomial distortion inverts
     and starts pulling points back toward the center.
     """
-    if distortion_model is None:
-        return float('inf')
-
     H_img, W_img = img_shape
+    if distortion_model is None:
+        return np.hypot(H_img, W_img) / 2
 
     # Calculate maximum possible radius to the image corners
     corners = np.array([[0, 0], [W_img, 0], [W_img, H_img], [0, H_img]], dtype=np.float32)
     max_frame_radius = np.ceil(np.max(np.hypot(corners[:, 0] - cx, corners[:, 1] - cy)))
-
     # Extend lookup slightly beyond corners to catch shapes entering the frame boundary
     extended_search_radius = max_frame_radius * 1.5
-
     # Create a dense radial sampling row from 0 up to the extended radius bound
     sample_radii = np.arange(0, extended_search_radius, 1.0, dtype=np.float32)
-
     # Project test points along a horizontal ray running outwards from the center
     test_pts = np.zeros((len(sample_radii), 2), dtype=np.float32)
     test_pts[:, 0] = cx + sample_radii
     test_pts[:, 1] = cy
-
     # Pass the dense evaluation line through the distortion profile
-    distorted_test_pts = distortion_model(test_pts)
-
+    distorted_test_pts = np.asarray(distortion_model(test_pts))
     # Measure distorted radial distances from center
     distorted_radii = np.sqrt((distorted_test_pts[:, 0] - cx) ** 2 + (distorted_test_pts[:, 1] - cy) ** 2)
-
     # Locate the exact index where a further point turns back and gets closer
     max_dist_idx = np.argmax(distorted_radii)
 
@@ -50,7 +78,7 @@ class ProjectiveCamera:
                  f_px: float,
                  cx: float,
                  cy: float,
-                 k1: float = -1.5e-7,
+                 k1: float = -0.015,
                  mode = "perspective"):
         """
         Args:
@@ -79,11 +107,7 @@ class ProjectiveCamera:
             self.K[2,2] = 0
 
         # 2. Instantiate the Projective Lens Distortion Lambda Function
-        self.distortion_model = lambda pts: np.array([
-            [
-                self.cx + (x - self.cx) * (1.0 + self.k1 * ((x - self.cx) ** 2 + (y - self.cy) ** 2)),
-                self.cy + (y - self.cy) * (1.0 + self.k1 * ((x - self.cx) ** 2 + (y - self.cy) ** 2))
-            ] for x, y in pts], dtype=np.float32)
+        self.distortion_model = Distortion(cx, cy, f_px, k1) if abs(k1) > 1.e-3 else None
 
         # 3. Deterministic Structural Boundary Profiler
         # Always computed automatically based on the distortion coefficients
@@ -94,6 +118,8 @@ class ProjectiveCamera:
         :param point:
         :return:
         """
+        if self.distortion_model is None:
+            return point
         MAX_ITER = 20
         a = point
         b = point * 2
@@ -101,7 +127,7 @@ class ProjectiveCamera:
         r_prev = 2 * r_d
         for k in range(MAX_ITER):
             p = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
-            p_d = self.distortion_model([p])[0]
+            p_d = self.distortion_model(p)
             r = np.hypot(p_d[0]-self.cx, p_d[1]-self.cy)
             if r < r_d:
                 a = p
