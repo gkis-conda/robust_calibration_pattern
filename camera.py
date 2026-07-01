@@ -50,7 +50,8 @@ class ProjectiveCamera:
                  f_px: float,
                  cx: float,
                  cy: float,
-                 k1: float = -1.5e-7):
+                 k1: float = -1.5e-7,
+                 mode = "perspective"):
         """
         Args:
             w_img (int): Total physical sensor pixel width (e.g., 1920).
@@ -67,12 +68,15 @@ class ProjectiveCamera:
         self.cx = float(cx)
         self.cy = float(cy)
         self.f_px = f_px
+        self.mode = mode
         # 1. Clean Constructor Initialization of the Intrinsic Camera Matrix (K)
         self.K = np.array([
             [f_px, 0.0, self.cx],
             [0.0, f_px, self.cy],
             [0.0, 0.0, 1.0]
         ], dtype=np.float64)
+        if mode == "affine":
+            self.K[2,2] = 0
 
         # 2. Instantiate the Projective Lens Distortion Lambda Function
         self.distortion_model = lambda pts: np.array([

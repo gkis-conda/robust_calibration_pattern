@@ -6,7 +6,7 @@ from crystal import reconstruct_mesh
 from matcher import localize_grid
 from lattice_topology import *
 from generate import generate_triangular_gray_grid
-from optimization import calibrate_camera
+from optimization import *
 from camera import ProjectiveCamera
 from pathlib import Path
 
@@ -298,6 +298,48 @@ def verify_and_cleanse_topological_matrix(topological_matrix: np.ndarray,
     return wiped_count
 
 
+
+class HexagonalTopologyDetector:
+    """
+    """
+    def __init__(self, grid_rows, grid_cols):
+        # OpenCV grid patterns expect dimensions passed as (columns, rows)
+        self.grid_size = (grid_cols, grid_rows)
+
+    def register_pattern(self, img, overlay: True):
+        """
+        Returns:
+            dict: {(row, col): [x_px, y_px]} containing indexed sub-pixel centers.
+        """
+        result = {}
+        pts, labels = detect_and_classify_grid_nodes(img)
+        result["points"] = pts
+        result["labels"] = labels
+        width, height = self.grid_size
+        topological_matrix = np.full((height, width), -1, dtype=np.int32)
+        if len(pts) == 0:
+            return result
+        if overlay:
+            visualize_detections(img, pts, labels)
+
+        matches_islands = reconstruct_mesh(pts, labels)
+        matches = []
+        for island in matches_islands:
+            if overlay:
+                visualize_reconstructed_grid(img, island, pts)
+            island_label_map = map_matrix_indices(island, labels)
+            match_result = localize_grid(island_label_map, width, height)
+            if match_result is not None:
+                matches.append(match_result)
+                map_island_indices_to_blueprint(island, match_result, topological_matrix)
+
+        wiped_ghosts = verify_and_cleanse_topological_matrix(
+                topological_matrix, generate_triangular_gray_grid(width, height), labels)
+        result["matches"] = matches
+        if len(matches) > 0:
+            result["topological_matrix"] = topological_matrix
+        return result
+
 # =====================================================================
 # SYSTEM TERMINAL INTERFACE
 # =====================================================================
@@ -307,52 +349,38 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Grid Extraction Parser.")
     parser.add_argument("-i", "--input", type=str, required=True, help="Input calibration frame image path.")
     parser.add_argument("-o", "--output", type=str, default="", help="Output file path.")
+    parser.add_argument("-C", "--calibrate", action='store_true', help="Perform focal distance and k1 calibration")
     args = parser.parse_args()
-    success = False    
+    if args.output == "":
+        output = Path(args.input).stem + "_result.png"
+    else:
+        output = args.output
+
     img = cv2.imread(args.input)
     if img is None:
         print(f"[Error] Visualizer failed to open file at: '{args.input}'", file=sys.stderr)
-    else: 
-        pts, labels = detect_and_classify_grid_nodes(img)
+    else:
+        detector = HexagonalTopologyDetector(31, 31)
+        result = detector.register_pattern(img, overlay=True)
+        labels = result["labels"]
+        pts = result["points"]
         print(f"Extraction Successful! Isolated {len(pts)} total pattern nodes.")
         print(f" -> Circles identified: {np.sum(labels == 0)}")
-        print(f" -> Squares identified: {np.sum(labels == 1)}")
-
-    if args.output == "":
-        output = Path(args.input).stem + "result.png"
-    else:
-        output = args.output
-    width, height = (31,31)
-    topological_matrix = np.full((height, width), -1, dtype=np.int32)
-    if len(pts) > 0:
-        visualize_detections(img, pts, labels)
-        matches_islands = reconstruct_mesh(pts, labels)
-        for island in matches_islands:
-            island_label_map = map_matrix_indices(island, labels)
-            match_result = localize_grid(island_label_map, width, height)
-            if match_result is not None:
-                print (match_result)
-                visualize_reconstructed_grid(img, island, pts)
-                map_island_indices_to_blueprint(island, match_result, topological_matrix)
-
-        wiped_ghosts = verify_and_cleanse_topological_matrix(
-            topological_matrix,
-            generate_triangular_gray_grid(width, height), labels)
-
-        if wiped_ghosts > 0:
-            print(f" -> Post-Verification Action: Wiped out {wiped_ghosts} false-positive ghost nodes.")
+        print(f" -> Triangles identified: {np.sum(labels == 1)}")
         success = cv2.imwrite(output, img)
-    if success:
-        print(f"Debug image with marked nodes saved successfully to '{args.output}'")
-    else:
-        print(f"[Error] Failed to write visualizer image to: '{args.output}'", file=sys.stderr)
-
-    np.set_printoptions(threshold=np.inf, linewidth=200)
-    print("Final mapping")
-    print(topological_matrix)
-    mapped_labels = map_matrix_indices(topological_matrix, labels)
-    print(mapped_labels)
-    H, W = img.shape[:2]
-    cam = ProjectiveCamera((width, height), f_px=(W+H)/4, cx=W/2, cy=H/2, k1=-1.e-7)
-    result = calibrate_camera(topological_matrix, pts, cam)
-    print(result)
+        if success:
+            print(f"Visualization overlay image with marked nodes saved successfully to '{output}'")
+        else:
+            print(f"Failed to write visualizer image to: '{output}'", file=sys.stderr)
+        if "topological_matrix" in result:
+            topological_matrix = result["topological_matrix"]
+            np.set_printoptions(threshold=np.inf, linewidth=200)
+            print("Final mapping")
+            print(topological_matrix)
+            mapped_labels = map_matrix_indices(topological_matrix, labels)
+            print(mapped_labels)
+            H, W = img.shape[:2]
+            if args.calibrate:
+               cam = ProjectiveCamera((W, H), f_px=(W+H)/4, cx=W/2, cy=H/2, k1=-1.e-7)
+               result = calibrate_single_frame_zhang_menger(topological_matrix, pts, cam)
+               print(result)

@@ -1,8 +1,8 @@
-# Hexagonal Calibration Pattern based on Galois Field sequences
+# Hexagonal Calibration Pattern (HCP) based on Galois Field sequences
 
 ## Intro
 
-An advanced, single-frame blind 2D coordinate tracking and camera-IMU calibration pattern. By wrapping one-dimensional Galois Field M-sequences over a staggered hexagonal rhomboid lattice mesh, this framework achieves absolute, 
+An advanced, single-frame blind 2D coordinate tracking and camera-IMU calibration pattern. By wrapping one-dimensional Galois Field M-sequences over a staggered hexagonal lattice mesh, this framework achieves absolute, 
 self-identification from almost any localized window fragment. The system maintains total geometric resilience under high perspective shear and optical noise.
 This repository serves as a mathematically alternative to traditional calibration patterns (like AprilTags, ChArUco, or checkerboards) that fail under motion blur, severe geometric warping, or illumination phase occlusions.
 
@@ -76,6 +76,17 @@ produces test and diagnostic images, reports prformance accuracy tests.
 
 ### 3. Run a Live Image Tracking Extraction Pass
 To parse a single arbitrary image frame of the printed pattern, execute a blind phase-lock capture pass, match pattern and perform Menger curvature camera distortion calibration.
+and optionally calibrate distortion model (-C key)
 
 `python detector.py --input synthetic_shot_bitflips.png >synthetic_shot_bitflips.txt`
 
+### 4. Benchmarks
+To compare performance on more realistic test cases the Blender based image generator in used. It creates set of test images with corresponding ground truth description.
+
+`blender --background --python blender_benchmark.py -- --engine hcp`
+
+`blender --background --python blender_benchmark.py -- --engine opencv`
+
+To extend benchmark with your pattern use blender_factory.py. Evaluation is done with run_validation.py
+
+*Note: The extra -- separator is a standard Blender python constraint required to separate Blender's native CLI args from custom Python script flags).*

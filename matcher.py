@@ -10,25 +10,25 @@ class BarycentricSignalIsolator:
     Zigzag representation is expected
     """
     @staticmethod
-    def isolate_u_axis(matrix: np.ndarray) -> tuple:
+    def isolate_u_axis(patch: np.ndarray) -> tuple:
         """Extracts continuous bits for the U-axis from the composite matrix layout.
         Returns:
             tuple: (isolated_bits, valid_mask)
             - isolated_bits: A list of isolated differential bits or placeholders.
             - valid_mask: A boolean tracking array starting at index 0.
         """
-        assert isinstance(matrix, np.ndarray), "Matrix input must be a NumPy array"
-        H, W = matrix.shape
-
-        isolated_bits = np.zeros(W-2,np.int8)
-        valid_mask = np.zeros(W-2,np.int8)
+        assert isinstance(patch, np.ndarray), "Matrix input must be a NumPy array"
+        H, W = patch.shape
+        bit_len = W - 2
+        isolated_bits = np.zeros(bit_len,np.int8)
+        valid_mask = np.zeros(bit_len,np.int8)
         if H > 1:
-            for c in range(W - 2):
+            for c in range(bit_len):
                 # Sample the 4 target intersection nodes from the matrix canvas U[i] + U[i+2]
-                p0 = matrix[0, c+1]
-                p1 = matrix[0, c+2]
-                p2 = matrix[1, c+0]
-                p3 = matrix[1, c+1]
+                p0 = patch[0, c+1]
+                p1 = patch[0, c+2]
+                p2 = patch[1, c+0]
+                p3 = patch[1, c+1]
 
                 # Missing value protection check for camera sensor dropouts (-1)
                 if p0 == -1 or p1 == -1 or p2 == -1 or p3 == -1:
@@ -44,7 +44,6 @@ class BarycentricSignalIsolator:
     @staticmethod
     def isolate_w_rev_axis(patch: np.ndarray) -> tuple:
         """Extracts the maximum possible number of consecutive horizontal tracking bits.
-
         Uses a 4-pixel diamond block to eliminate both U and V interferences,
         leaving a clean, decodable W-axis polynomial sequence.
         """
@@ -54,17 +53,18 @@ class BarycentricSignalIsolator:
         valid_mask = np.zeros(bits_len, np.int8)
 
         # using  -> W[i] + W[i - 2], so the line should be inverted for correct axis
-        for offset in range(bits_len):
-            p0 = patch[0, offset]
-            p1 = patch[0, offset + 1]
-            p2 = patch[1, offset]
-            p3 = patch[1, offset + 1]
+        if ph > 1:
+            for offset in range(bits_len):
+                p0 = patch[0, offset]
+                p1 = patch[0, offset + 1]
+                p2 = patch[1, offset]
+                p3 = patch[1, offset + 1]
 
-            if p0 == -1 or p1 == -1 or p2 == -1 or p3 == -1:
-                pass
-            else:
-                isolated_bits[offset] = int(p0 ^ p1 ^ p2 ^ p3)
-                valid_mask[offset] = 1
+                if p0 == -1 or p1 == -1 or p2 == -1 or p3 == -1:
+                    pass
+                else:
+                    isolated_bits[offset] = int(p0 ^ p1 ^ p2 ^ p3)
+                    valid_mask[offset] = 1
 
         return isolated_bits, valid_mask
 
@@ -104,7 +104,7 @@ class BarycentricSignalIsolator:
 
 class AlgebraicGridDecoder32:
     """
-    retrieve barycentric coordinates by
+    retrieve barycentric coordinates
     """
     def __init__(self, grid_width, grid_height):
         """Initializes the main grid environment and registers all 6 directional decoders."""
@@ -230,7 +230,7 @@ class AlgebraicGridDecoder32:
 
         H_global, W_global = self.H, self.W
 
-        # Resolve any remaining period phase wraps entirely on the U-axis
+        # Resolve any remaining period phase
         abs_row, abs_col = normalize_barycentric(u, v, self.lfsr_period)
 
         # Rigid safety assertion gates
@@ -245,7 +245,7 @@ class AlgebraicGridDecoder32:
             "b":(u, v, -u-v), # detected coordinates in blueprint
             "horizontal_axis": horiz_axis,
             "direction": horiz_dir,
-            "errors_corrected": len(status_horiz.get("errors_corrected"))
+            "errors_corrected": len(status_horiz.get("errors_corrected")) + len(status_vert.get("errors_corrected"))
         }
 
 
@@ -336,7 +336,21 @@ class AlgebraicGridDecoder32:
 
     @staticmethod
     def check_error_consistency(res_h, res_v):
-        return np.array_equal(np.array(res_h["errors_corrected"]) + 1, np.array(res_v["errors_corrected"]))
+        """
+        Data is restored from the same buffer, so errors should be in the same locations or missed
+        :param res_h:
+        :param res_v:
+        :return:
+        """
+        for err_idx in res_h["errors_corrected"]:
+            if not (err_idx + 1 in res_v["errors_corrected"]) and \
+                not (err_idx + 1 in res_v["missing_gaps"]):
+                return False
+        for err_idx in res_v["errors_corrected"]:
+            if not (err_idx - 1 in res_h["errors_corrected"]) and \
+                not (err_idx - 1 in res_h["missing_gaps"]):
+                return False
+        return True
 
     def decode_barycentric_subgraph(self, patch: np.ndarray):
         """Tests the patch rows against all 6 directional polynomials to find the absolute position.
@@ -367,15 +381,17 @@ class AlgebraicGridDecoder32:
                 if res_v:
                     res_h["direction_key"] = direction_key
                     res_v["direction_key"] = vert_key
+                    print("Hor: ", res_h)
+                    print("Vert: ", res_v)
                     if self.check_error_consistency(res_h, res_v):
-                        print("Hor: ", res_h)
-                        print("Vert: ", res_v)
                         # Translate lattice spaces back to absolute flat matrix positions
                         result = self.resolve_cell_index(res_h, res_v)
                         if result["status"] == "success" and result['errors_corrected'] < best_result['errors_corrected']:
                             best_result = result
                             if best_result['errors_corrected'] == 0:
                                 break
+                    else:
+                        print("Error consistency check failed")
 
         return best_result
 
@@ -384,6 +400,8 @@ def localize_grid(island, width, height):
     retriever = AlgebraicGridDecoder32(width, height)
     h, w = island.shape
     result = None
+    MIN_UNIQUE_SEQUENCE_LEN = 11
+    MIN_LEN = MIN_UNIQUE_SEQUENCE_LEN + 2 # + 2 for integration ( 5 + checksum)
     for r in range(0, h, 2):
         for c in range(0, w, 1):
             if island[r, c] >= 0:
@@ -393,8 +411,8 @@ def localize_grid(island, width, height):
                 break
         print(r, c, e - c + 1)
         L = e - c + 1
-        if L < 14:
-            continue # minimal check sequence is 9, 5 poly, 2 checksum bits and + 2 for integration
+        if L < MIN_LEN:
+            continue
         adjusted_c = (c & (0xfffff - 1)) if r % 2 == 0 else (c | 1)
         sub_island = island[r:r+2, adjusted_c:e+1]
         result = retriever.decode_barycentric_subgraph(sub_island)
