@@ -306,7 +306,7 @@ class HexagonalTopologyDetector:
         # OpenCV grid patterns expect dimensions passed as (columns, rows)
         self.grid_size = (grid_cols, grid_rows)
 
-    def register_pattern(self, img, overlay: True):
+    def register_pattern(self, img, debug_overlay: True):
         """
         Returns:
             dict: {(row, col): [x_px, y_px]} containing indexed sub-pixel centers.
@@ -319,13 +319,13 @@ class HexagonalTopologyDetector:
         topological_matrix = np.full((height, width), -1, dtype=np.int32)
         if len(pts) == 0:
             return result
-        if overlay:
+        if debug_overlay:
             visualize_detections(img, pts, labels)
 
         matches_islands = reconstruct_mesh(pts, labels)
         matches = []
         for island in matches_islands:
-            if overlay:
+            if debug_overlay:
                 visualize_reconstructed_grid(img, island, pts)
             island_label_map = map_matrix_indices(island, labels)
             match_result = localize_grid(island_label_map, width, height)
@@ -339,6 +339,7 @@ class HexagonalTopologyDetector:
         if len(matches) > 0:
             result["topological_matrix"] = topological_matrix
         return result
+
 
 # =====================================================================
 # SYSTEM TERMINAL INTERFACE
@@ -381,6 +382,6 @@ if __name__ == "__main__":
             print(mapped_labels)
             H, W = img.shape[:2]
             if args.calibrate:
-               cam = ProjectiveCamera((W, H), f_px=(W+H)/4, cx=W/2, cy=H/2, k1=-1.e-7)
+               cam = ProjectiveCamera((W, H), fx_px=(W+H)/4,  fy_px=(W+H)/4, cx=W/2, cy=H/2, k1=-0.1)
                result = calibrate_single_frame_zhang_menger(topological_matrix, pts, cam)
                print(result)

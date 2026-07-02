@@ -3,8 +3,9 @@ import argparse
 import os
 import numpy as np
 
-from opencv_baseline_engine import OpenCVCirclesGridMeshGenerator
+from opencv_baseline_engine import OpenCVCirclesGridMeshGenerator, OpenCVGridDetector
 from generate import PhysicalMeshGenerator, generate_triangular_gray_grid
+from detector import HexagonalTopologyDetector
 
 def generate_opencv_unary_blueprint(rows, cols):
     """
@@ -20,11 +21,11 @@ def pattern_blueprint_factory(engine_name, rows, cols):
     """
     engine_key = str(engine_name).strip().lower()
     
-    if engine_key in ["hcp"]:
+    if engine_key in ["hcp", "hexagonal"]:
         print(f"Blueprint Factory: Constructing a binary hexagonal error-correcting layout matrix ({rows}x{cols})")
         return generate_triangular_gray_grid(rows, cols)
         
-    elif engine_key in ["opencv", "opencv_baseline", "baseline"]:
+    elif engine_key in ["chessboard", "circles", "asymmetric_circles"]:
         print(f"Blueprint Factory: Constructing a unary uniform target grid layout matrix ({rows}x{cols})")
         return generate_opencv_unary_blueprint(rows, cols)
 
@@ -34,35 +35,57 @@ def pattern_blueprint_factory(engine_name, rows, cols):
 
 def mesh_generator_factory(engine_name, grid_matrix, step_mm, r_circ, density=2.0):
     """
-    Virtual 'Constructor' Factory Engine. Resolves named string arguments 
+    Virtual 'Constructor' Factory Engine. Resolves named string arguments
     into explicit class instances conforming to the unified generator interface.
     """
     # Force lowercase string verification to capture variations gracefully
     engine_key = str(engine_name).strip().lower()
-    
-    if engine_key in ["hcp"]:
+
+    if engine_key in ["hcp", "hexagonal"]:
         print("Factory: Constructing Hexagonal Calibration Engine")
         return PhysicalMeshGenerator(
-            grid_matrix=grid_matrix, 
-            step_mm=step_mm, 
+            grid_matrix=grid_matrix,
+            step_mm=step_mm,
             r_circ=r_circ
         )
-        
-    elif engine_key in ["opencv", "opencv_baseline", "baseline"]:
+
+    elif engine_key in ["chessboard", "circles", "asymmetric_circles"]:
         print(f"Factory: Constructing standard Baseline Engine")
         return OpenCVCirclesGridMeshGenerator(
-            grid_matrix=grid_matrix, 
-            step_mm=step_mm, 
+            grid_matrix=grid_matrix,
+            step_mm=step_mm,
             r_circ=r_circ,
             circle_points_per_mm=density
         )
-        
+
     else:
         # Strict validation fallback safety
         raise ValueError(f"Factory Error: Unknown engine token string requested: '{engine_name}'")
 
 
-def parse_blender_arguments():
+def create_detector(engine_name, grid_rows, grid_cols):
+    """
+    Factory dispatcher generating standard structural node registry interfaces.
+    Args:
+        engine_type (str): Either 'HEXAGONAL' or 'OPENCV'.
+        grid_rows (int): Expected horizontal geometric line partitions.
+        grid_cols (int): Expected vertical geometric line partitions.
+        pattern_style (str): Variant profile identifier strictly for OpenCV pipelines.
+    """
+    engine_key = str(engine_name).strip().lower()
+
+    if engine_key in ["hcp", "hexagonal"]:
+        print(f" -> [Factory] Allocating Custom Hexagonal Topology Engine ({grid_rows}x{grid_cols})")
+        return HexagonalTopologyDetector(grid_rows=grid_rows, grid_cols=grid_cols)
+
+    elif engine_key in ["chessboard", "circles", "asymmetric_circles"]:
+        print(f" -> [Factory] Allocating OpenCV Native Engine via profile: {engine_key}")
+        return OpenCVGridDetector(grid_rows=grid_rows, grid_cols=grid_cols, pattern_type=engine_key)
+
+    raise KeyError(f"Unsupported validation engine type token requested: '{engine_key}'")
+
+
+def parse_arguments():
     """
     Parses arguments passed behind Blender's native '--' delimiter token.
     """
@@ -73,7 +96,9 @@ def parse_blender_arguments():
         python_args = []
 
     parser = argparse.ArgumentParser(description="TCM Benchmarking Run Parameter Controller")
-    parser.add_argument("-e", "--engine", type=str, default="trellis", help="Execution Engine ('trellis'/'opencv')")
+    parser.add_argument("-e", "--engine", type=str, default="hexagonal", help="Execution Engine ('hexagonal'/'opencv')")
+    parser.add_argument("-p", "--path", type=str, default="./output", help="Working folder path")
+
     parser.add_argument("-r", "--rows", type=int, default=31, help="Lattice height count")
     parser.add_argument("-c", "--cols", type=int, default=31, help="Lattice width count")
        
@@ -81,7 +106,7 @@ def parse_blender_arguments():
 
 
 if __name__ == "__main__":
-    args = parse_blender_arguments()
+    args = parse_arguments()
     engine = args.engine
     
     LATTICE_ROW_COUNT = args.rows
@@ -89,8 +114,8 @@ if __name__ == "__main__":
     PATTERN_STEP_MM = 20.0
     PRIMITIVE_RADIUS_MM = 6.0
     
-    BASE_PATH = "./blender_output"
-    ENGINE_SPECIFIC_DIR = os.path.abspath(f"{BASE_PATH}_{engine}")
+    BASE_PATH = args.path
+    ENGINE_SPECIFIC_DIR = os.path.abspath(f"{BASE_PATH}_{engine.lower()}")
     if not os.path.exists(ENGINE_SPECIFIC_DIR):
         os.makedirs(ENGINE_SPECIFIC_DIR)
         

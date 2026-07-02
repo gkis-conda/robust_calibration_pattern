@@ -421,21 +421,24 @@ def calibrate_single_frame_zhang_menger(topological_matrix: np.ndarray,
 
     node_weights = np.ones(len(detected_points), dtype=np.float32)
     state = { "shape" : camera_object.img_shape,
-              "f" : camera_object.f_px, "cx" : camera_object.cx, "cy" : camera_object.cy,
-              "mode" : "perspective"}
+              "fx" : camera_object.fx_px, "fy" : camera_object.fy_px, "cx" : camera_object.cx, "cy" : camera_object.cy,
+              "mode" : camera_object.mode}
     # =====================================================================
     # DYNAMIC LOSS CLOSURE: EMBEDDING ZHANG INSIDE THE MENGER LOOP
     # =====================================================================
-    def dynamic_calibration_objective(params):
+    def dynamic_calibration_objective(params:list):
         """
         Evaluates the loss parameter by first un-distorting lines via k1,
         dynamically re-calculating the focal matrix K, and computing Menger curvature.
         """
         k1_proposed = float(params[0])
+        print("k1 = ", k1_proposed)
         # Apply proposed distortion factor to the active camera instance
         # Generate un-distorted coordinates strictly matching this candidate k1 curve step
-        modified_cam = ProjectiveCamera(state["shape"], state["f"], state["cx"], state["cy"],
+        modified_cam = ProjectiveCamera(state["shape"],
+                                        state["fx"], state["fy"], state["cx"], state["cy"],
                                         k1_proposed, state["mode"])
+
         corrected_points = modified_cam.undistort_points(detected_points)
         u_eqs = [compute_homogeneous_line(ln, corrected_points) for ln in u_lines]
         v_eqs = [compute_homogeneous_line(ln, corrected_points) for ln in v_lines]
@@ -451,7 +454,7 @@ def calibrate_single_frame_zhang_menger(topological_matrix: np.ndarray,
         if result["status"] == "success":
             print(result)
             # Assign the freshly solved analytical intrinsics to the camera instance
-            modified_cam = ProjectiveCamera(state["shape"], result["fx"], state["cx"], state["cy"], k1_proposed, result["mode"])
+            modified_cam = ProjectiveCamera(state["shape"], result["fx"], result["fy"], state["cx"], state["cy"], k1_proposed, result["mode"])
         else:
             print(result["message"])
 
@@ -463,18 +466,19 @@ def calibrate_single_frame_zhang_menger(topological_matrix: np.ndarray,
             cam=modified_cam
         )
 
-        state["f"] = modified_cam.f_px
+        state["fx"] = modified_cam.fx_px
+        state["fy"] = modified_cam.fy_px
         state["mode"] = modified_cam.mode
+        state["k1"] = modified_cam.k1
         # Restore camera state for thread-isolation safety
         return loss_val
 
     # Execute the 1D optimization pass over the distortion parameter space
-    x0_k1 = [float(camera_object.k1)]
     print(" -> Launching joint minimization loop (Zhang inside Menger)...")
 
     opt_res = scipy.optimize.minimize(
         fun=dynamic_calibration_objective,
-        x0=x0_k1,
+        x0=[float(camera_object.k1)],
         method='Nelder-Mead',
         options={'xatol': 1e-5, 'fatol': 1e-5, 'maxiter': 200}
     )
@@ -483,12 +487,13 @@ def calibrate_single_frame_zhang_menger(topological_matrix: np.ndarray,
     if opt_res.success:
         camera_object.k1 = opt_res.x[0]
         camera_object.mode = state["mode"]
-        camera_object.f_px = state["f"]
+        camera_object.fx_px = state["fx"]
+        camera_object.fy_px = state["fy"]
         camera_object.cx = state["cx"]
         camera_object.cy = state["cy"]
         print("\n--- DYNAMIC INTRINSIC CALIBRATION SUCCESS ---")
-        print(f" -> Solved Camera Focal Length (f) : {camera_object.f_px:.4f} pixels")
-        print(f" -> Solved Principal Center (cx,cy): ({camera_object.cx:.2f}, {camera_object.cy:.2f})")
+        print(f" -> Solved Camera Focal Length (fx,fy) : {camera_object.fx_px:.2f}, {camera_object.fy_px:.2f}")
+        print(f" -> Solved Principal Center (cx,cy): {camera_object.cx:.2f}, {camera_object.cy:.2f}")
         print(f" -> Solved Lens Distortion (k1)    : {camera_object.k1:.8f}")
     else:
         print(" -> [ERROR] Optimization loop failed to reach target convergence limits.")
@@ -496,7 +501,8 @@ def calibrate_single_frame_zhang_menger(topological_matrix: np.ndarray,
     return {
         "status": "success" if opt_res.success else "failed",
         "mode" : camera_object.mode,
-        "f_px": camera_object.f_px,
+        "fx": camera_object.fx_px,
+        "fy": camera_object.fy_px,
         "cx": camera_object.cx,
         "cy": camera_object.cy,
         "radial_k1": camera_object.k1,
@@ -531,10 +537,16 @@ def _extract_and_filter_axis_lines(axis_map: dict,
 
     axis_output_lines = []
     for _, idx in target_slice:
-        axis_output_lines.append(all_harvested_lines[idx])
+        # Fetch the raw tuple list from storage
+        raw_line = all_harvested_lines[idx]
+        # 1. Sort the tuple list in-place. Python automatically sorts by
+        # the first element (your r or c sorting index)!
+        raw_line.sort()
+        # 2. Extract only the clean point_idx values from the sorted tuples list
+        clean_sorted_line = [point_idx for _, point_idx in raw_line]
+        axis_output_lines.append(clean_sorted_line)
 
     return axis_output_lines
-
 
 def harvest_hexagonal_line_bundles(topological_matrix: np.ndarray,
                                    N: int = 16,
@@ -575,20 +587,20 @@ def harvest_hexagonal_line_bundles(topological_matrix: np.ndarray,
 
             if u_linear not in u_map:
                 u_map[u_linear] = []
-            u_map[u_linear].append(point_idx)
+            u_map[u_linear].append((c, point_idx))
 
             if v_linear not in v_map:
                 v_map[v_linear] = []
-            v_map[v_linear].append(int(point_idx))
+            v_map[v_linear].append((r, point_idx))
 
             if w_linear not in w_map:
                 w_map[w_linear] = []
-            w_map[w_linear].append(int(point_idx))
+            w_map[w_linear].append((c, point_idx))
 
             if r%2 == 0:
                 if r not in r_map:
                     r_map[r] = []
-                r_map[r].append(point_idx)
+                r_map[r].append((r, point_idx))
 
     all_harvested_lines = []
 

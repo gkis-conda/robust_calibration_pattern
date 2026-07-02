@@ -69,48 +69,97 @@ class OpenCVCirclesGridMeshGenerator:
 # ==============================================================================
 # SECTION 2: PYTHON 3.6 DETECTOR INTERFACE (Plugs into validation framework)
 # ==============================================================================
-class OpenCVCirclesGridDetector:
-    """
-    Interface compatible with MockTopologyDetector. Runs native OpenCV 
-    C++ routines to automatically find and index circles grid patterns.
-    """
-    def __init__(self, grid_rows, grid_cols):
-        # OpenCV grid patterns expect dimensions passed as (columns, rows)
-        self.grid_size = (grid_cols, grid_rows)
 
-    def register_pattern(self, image_bgr):
+class OpenCVGridDetector:
+    """
+    OpenCV-based standard calibration target grid detector.
+    Supports either standard Chessboard layouts or Symmetric/Asymmetric Circle Grids.
+    """
+
+    def __init__(self, grid_rows, grid_cols, pattern_type="CHESSBOARD"):
+        # OpenCV expects pattern dimensions passed as (columns, rows)
+        self.grid_size = (grid_cols, grid_rows)
+        self.pattern_type = pattern_type.upper()
+
+    def register_pattern(self, img, debug_overlay=True):
         """
-        Executes standard OpenCV asymmetric circles grid registration.
+        Executes native OpenCV grid registration routines.
         Returns:
-            dict: {(row, col): [x_px, y_px]} containing indexed sub-pixel centers.
+            dict: Consistent data payload mapping detected node topologies.
         """
-        # 1. Standard preprocessing (OpenCV blob analysis executes over grayscale)
-        gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-        
-        # 2. Configure detection flags. 
-        # CALIB_CB_ASYMMETRIC_GRID handles row-staggered hexagonal grids.
-        # If your layout spacing is perfectly rectangular, use CALIB_CB_SYMMETRIC_GRID.
-        flags = cv2.CALIB_CB_ASYMMETRIC_GRID
-        
-        # Native C++ processing loop execution
-        found, corners = cv2.findCirclesGrid(gray, self.grid_size, flags=flags)
-        
-        registered_topology = {}
-        
-        # The ultimate weakness of the baseline: if extreme perspective tilt (>70) 
-        # or dynamic motion blur destroys even 1 or 2 dots, findCirclesGrid 
-        # completely fails to reconstruct the graph mapping arrays and returns False.
+        from detector import visualize_detections
+        result = {
+            "points": [],
+            "labels": [],
+            "matches": []
+        }
+
+        width, height = self.grid_size
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
+
+        # 1. Primary Feature Detection
+        found = False
+        corners = None
+
+        if self.pattern_type == "CHESSBOARD":
+            flags = cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
+            found, corners = cv2.findChessboardCorners(gray, self.grid_size, flags=flags)
+            if found and corners is not None:
+                criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+                corners = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
+
+        elif self.pattern_type == "CIRCLES" or self.pattern_type == "SYMMETRIC_CIRCLES":
+            flags = cv2.CALIB_CB_SYMMETRIC_GRID
+            found, corners = cv2.findCirclesGrid(gray, self.grid_size, flags=flags)
+
+        elif self.pattern_type == "ASYMMETRIC_CIRCLES":
+            flags = cv2.CALIB_CB_ASYMMETRIC_GRID
+            found, corners = cv2.findCirclesGrid(gray, self.grid_size, flags=flags)
+
+        # 2. Early exit if spatial configuration detection failed
         if not found or corners is None:
-            return registered_topology
-            
-        # 3. Reconstruct topological map coordinates matrix from OpenCV sequence array.
-        # OpenCV output arrays are linearly ordered row-by-row, column-by-column.
+            return result
+
+        # 3. Payload Extraction and Structuring
+        # Flatten OpenCV output shape from (N, 1, 2) to standard (N, 2) array coordinates
+        points_flattened = corners.reshape(-1, 2)
+        result["points"] = points_flattened.tolist()
+
+        # Standard sequential integer labels matching linear grid order index
+        labels_generated = list(range(len(points_flattened)))
+        result["labels"] = labels_generated
+
+        # Optional debugging canvas projection step
+        if debug_overlay:
+            # We copy the source array to prevent mutating shared memory pipelines
+            debug_canvas = img.copy()
+            cv2.drawChessboardCorners(debug_canvas, self.grid_size, corners, found)
+            # Invoke native call to your custom visualizer framework if required
+            if 'visualize_detections' in globals():
+                visualize_detections(img, points_flattened, labels_generated)
+
+        # 4. Topological Layout Matrix Alignment
+        # Instantiating an empty -1 base tracking layout grid mapping (height x width)
+        topological_matrix = np.full((height, width), -1, dtype=np.int32)
+
+        # OpenCV populates grids linearly: Row by Row, from Left to Right
         idx = 0
-        for r in range(self.grid_size[1]):      # rows loop
-            for c in range(self.grid_size[0]):  # columns loop
-                if idx < len(corners):
-                    pt = corners[idx][0]        # Extract [X, Y] sub-pixel position
-                    registered_topology[(r, c)] = [float(pt[0]), float(pt[1])]
+        for r in range(height):
+            for c in range(width):
+                if idx < len(labels_generated):
+                    topological_matrix[r, c] = labels_generated[idx]
                     idx += 1
-                    
-        return registered_topology
+
+        # Replicating matching structures for downstream validation evaluators
+        mock_match_metadata = {
+            "origin_index": 0,
+            "grid_width": width,
+            "grid_height": height,
+            "status": "OPENCV_NATIVE_RESOLVED"
+        }
+
+        result["matches"] = [mock_match_metadata]
+        result["topological_matrix"] = topological_matrix
+
+        return result
+

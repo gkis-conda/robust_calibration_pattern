@@ -1,13 +1,13 @@
 import numpy as np
 
-def apply_radial_distortion(x_px, y_px, cx_px, cy_px, f_px, k1):
+def apply_radial_distortion(x_px, y_px, cx_px, cy_px, fx_px, fy_px,  k1):
     """
     Applies the mathematical Brown-Conrady radial distortion model (K1 only)
     to a single 2D pixel coordinate point.
     """
     # 1. Move to normalized camera coordinates space (x, y)
-    x_norm = (x_px - cx_px) / f_px
-    y_norm = (y_px - cy_px) / f_px
+    x_norm = (x_px - cx_px) / fx_px
+    y_norm = (y_px - cy_px) / fy_px
 
     # Calculate square of radius from principal axis point center
     r2 = (x_norm ** 2) + (y_norm ** 2)
@@ -16,25 +16,27 @@ def apply_radial_distortion(x_px, y_px, cx_px, cy_px, f_px, k1):
     distortion_multiplier = 1.0 + k1 * r2
 
     # 3. Map back to absolute canvas screen pixels
-    x_distorted = (x_norm * distortion_multiplier * f_px) + cx_px
-    y_distorted = (y_norm * distortion_multiplier * f_px) + cy_px
+    x_distorted = (x_norm * distortion_multiplier * fx_px) + cx_px
+    y_distorted = (y_norm * distortion_multiplier * fy_px) + cy_px
 
     return x_distorted, y_distorted
 
 
 class Distortion:
-    def __init__(self, cx_px, cy_px, f_px, k1):
+    def __init__(self, cx_px, cy_px, fx_px, fy_px, k1):
         self.cx = cx_px
         self.cy = cy_px
-        self.f = f_px
+        self.fx = fx_px
+        self.fy = fy_px
         self.k1 = k1
 
     def __call__(self, point):
         is_point = isinstance(point, tuple)
         if is_point:
-            return apply_radial_distortion(point[0], point[1], self.cx, self.cy, self.f, self.k1)
+            return apply_radial_distortion(point[0], point[1], self.cx, self.cy, self.fx, self.fy , self.k1)
         else:
-            return [apply_radial_distortion(x_px, y_px, self.cx, self.cy, self.f, self.k1) for x_px, y_px in point]
+            return [apply_radial_distortion(x_px, y_px, self.cx, self.cy, self.fx, self.fy, self.k1) for x_px, y_px in point]
+
 
 def compute_max_radius(distortion_model, cx, cy, img_shape=(1080, 1920)):
     """
@@ -75,7 +77,8 @@ class ProjectiveCamera:
 
     def __init__(self,
                  img_shape: (int,int),
-                 f_px: float,
+                 fx_px: float,
+                 fy_px: float,
                  cx: float,
                  cy: float,
                  k1: float = -0.015,
@@ -84,7 +87,8 @@ class ProjectiveCamera:
         Args:
             w_img (int): Total physical sensor pixel width (e.g., 1920).
             h_img (int): Total physical sensor pixel height (e.g., 1080).
-            f_px (float): Focal length in pixels.
+            fx_px (float): Focal length in pixels.
+            fy_px (float): Focal length in pixels.
             cx (float): Principal point X-coordinate (typically width / 2).
             cy (float): Principal point Y-coordinate (typically height / 2).
             k1 (float): Primary radial lens distortion coefficient.
@@ -95,19 +99,20 @@ class ProjectiveCamera:
         self.k1 = k1
         self.cx = float(cx)
         self.cy = float(cy)
-        self.f_px = f_px
+        self.fx_px = fx_px
+        self.fy_px = fy_px
         self.mode = mode
         # 1. Clean Constructor Initialization of the Intrinsic Camera Matrix (K)
         self.K = np.array([
-            [f_px, 0.0, self.cx],
-            [0.0, f_px, self.cy],
+            [self.fx_px, 0.0, self.cx],
+            [0.0, self.fy_px, self.cy],
             [0.0, 0.0, 1.0]
         ], dtype=np.float64)
         if mode == "affine":
             self.K[2,2] = 0
 
         # 2. Instantiate the Projective Lens Distortion Lambda Function
-        self.distortion_model = Distortion(cx, cy, f_px, k1) if abs(k1) > 1.e-3 else None
+        self.distortion_model = Distortion(cx, cy, fx_px, fy_px, k1) if abs(k1) > 1.e-3 else None
 
         # 3. Deterministic Structural Boundary Profiler
         # Always computed automatically based on the distortion coefficients

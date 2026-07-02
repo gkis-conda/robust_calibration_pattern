@@ -289,7 +289,7 @@ def evaluate_single_integration_case(base_blueprint: np.ndarray,
     cy = cam_intrinsics.get("cy", height/2)
     k1 = cam_intrinsics.get("k1")
 
-    cam_obj = ProjectiveCamera((width, height), f_px=f_px, cx=cx, cy=cy, k1=k1)
+    cam_obj = ProjectiveCamera((width, height), fx_px=f_px, fy_px=f_px, cx=cx, cy=cy, k1=k1)
 
     # 3. Compute camera projection extrinsics matrix [R|t] per case profile
     Rt = compute_camera_projection_matrix(

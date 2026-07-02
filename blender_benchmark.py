@@ -14,7 +14,7 @@ PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 # 2. Append to Python's module lookup stack if not already registered
 if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
-from blender_factory import *
+from detector_factory import *
 from camera import *
 
 # ==============================================================================
@@ -605,7 +605,7 @@ def render_sync(scene, base_output_path, case_name, start_frame: int):
 # ==============================================================================
 if __name__ == "__main__":
 
-    args = parse_blender_arguments()
+    args = parse_arguments()
     
     # 2. Global metric dimensions setup 
     LATTICE_ROW_COUNT = args.rows
