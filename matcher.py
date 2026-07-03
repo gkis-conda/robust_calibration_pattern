@@ -343,12 +343,10 @@ class AlgebraicGridDecoder32:
         :return:
         """
         for err_idx in res_h["errors_corrected"]:
-            if not (err_idx + 1 in res_v["errors_corrected"]) and \
-                not (err_idx + 1 in res_v["missing_gaps"]):
+            if not (err_idx + 1 in res_v["errors_corrected"]) and not (err_idx + 1 in res_v["missing_gaps"]):
                 return False
         for err_idx in res_v["errors_corrected"]:
-            if not (err_idx - 1 in res_h["errors_corrected"]) and \
-                not (err_idx - 1 in res_h["missing_gaps"]):
+            if not (err_idx - 1 in res_h["errors_corrected"]) and not (err_idx - 1 in res_h["missing_gaps"]):
                 return False
         return True
 

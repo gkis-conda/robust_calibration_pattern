@@ -256,7 +256,7 @@ class GridCrystalGrower:
         pred_ray_b = pt_target + (pt_target - pt_b)
         pred_ray_c = pt_target + (pt_target - pt_c)
 
-        search_radius = self.step * 0.2
+        search_radius = self.step * 0.5
         shared_pin_node = None
         v_anchor = None
 
@@ -275,9 +275,9 @@ class GridCrystalGrower:
                     shared_pin_node = hit_idx_c
                     v_anchor = v_c
 
-        # Safety short-circuit: if no valid graph-cut alignment pin is harvested, abort
+        # Safety short-circuit: if no valid graph alignment pin is harvested, abort
         if shared_pin_node is None or v_anchor is None:
-            return current_root
+            return None # cannot merge
 
         # 5. Extrapolate coordinates in Island 1 strictly along the successful ray axis.
         # Correspondence A: Point A (Lattice collision center)
@@ -295,7 +295,7 @@ class GridCrystalGrower:
 
         transform = find_discrete_transform(p_2A, p_2B, p_1A, p_1B)
         if transform is None:
-            return current_root
+            return None # cannot merge
 
         # 7. Trigger structural parent layout unification inside DSU
         new_master, old_slave = self.dsu.merge(current_root, hit_island_root)
@@ -365,8 +365,9 @@ class GridCrystalGrower:
                 hit_island_size = self.dsu.get_size(hit_island_root)
                 # --- CASE B: CROSS-ISLAND BOUNDARY CRASH (ISLAND FUSION) ---
                 if hit_island_size >= 3:
-                     self._execute_island_fusion_merge(
-                         current_root, hit_island_root, v_b, v_c, best_match_idx)
+                     if self._execute_island_fusion_merge(
+                         current_root, hit_island_root, v_b, v_c, best_match_idx) is None:
+                         continue
                 # --- CASE C: SINGLE POINT ABSORPTION ---
                 elif hit_island_size == 1:
                      new_root, old_root = self.dsu.merge(current_root, best_match_idx)
@@ -385,6 +386,7 @@ class GridCrystalGrower:
             if not reflect_C in self.globally_processed_faces:
                 next_queue.append(reflect_C)
                 self.globally_processed_faces.add(reflect_C)
+            assert best_match_idx in local_grid
         if self.debug_output:
             print(f"[Diag] Wave step complete: Added {sticks_added_this_step} structural ears.")
         return next_queue

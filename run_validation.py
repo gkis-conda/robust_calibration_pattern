@@ -25,11 +25,12 @@ def parse_ground_truth(file_path):
             r, c = int(parts[0]), int(parts[1])
             shape_type = int(parts[2])
             x_px, y_px = float(parts[3]), float(parts[4])
-            gt_data[(r, c)] = {"type": shape_type, "coord": [x_px, y_px]}
+            gt_data[(r, c)] = (shape_type, x_px, y_px)
             
     return gt_data
 
-def evaluate_dynamic_topology(gt_dict, detected_dict, step_mm=20.0):
+
+def evaluate_topology(gt_dict, detected_dict):
     """
     Evaluates tracking based on strict neighborhood constraints.
     A detection is rejected as a Ghost/Misalignment if it drifts 
@@ -41,16 +42,16 @@ def evaluate_dynamic_topology(gt_dict, detected_dict, step_mm=20.0):
     
     total_gt = len(gt_dict)
     if total_gt == 0:
-        return 0, 0, 0, 0.0, 0.0
+        return 0, 0, 0, 0.0, 0.0, 0
 
     # Extract ground truth structures for fast spatial mapping
     gt_keys = list(gt_dict.keys())
-    gt_coords = np.array([gt_dict[k]["coord"] for k in gt_keys])
+    gt_coords = np.array([gt_dict[k][1:3] for k in gt_keys])
     gt_tree = cKDTree(gt_coords)
-
+    avg_dist = 0.
     for det_id, det_coord in detected_dict.items():
         # 1. Locate the closest ground truth node in pixel space
-        dist, idx = gt_tree.query(det_coord, k=1)
+        dist, idx = gt_tree.query(det_coord[1:3], k=1)
         nearest_gt_key = gt_keys[idx]
         
         # 2. Dynamically calculate the local pixel step size
@@ -69,6 +70,7 @@ def evaluate_dynamic_topology(gt_dict, detected_dict, step_mm=20.0):
             
         # 4. Fact of Classification Audit inside the valid 1/3 neighborhood
         if det_id == nearest_gt_key:
+            avg_dist += dist
             tp += 1  # Successfully identified and localized within safety bounds
         else:
             ma += 1  # ID tracking mismatch inside the valid cell area
@@ -77,55 +79,9 @@ def evaluate_dynamic_topology(gt_dict, detected_dict, step_mm=20.0):
     precision_denom = tp + ma + fp
     precision = float(tp) / precision_denom if precision_denom > 0 else 0.0
     recall = float(tp) / total_gt if total_gt > 0 else 0.0
-    
-    return tp, ma, fp, precision, recall
-
-def evaluate_pure_topology(gt_dict, detected_dict):
-    """
-    Evaluates pattern registration focusing entirely on classification accuracy.
-    Uses KD-Tree spatial proximity mapping to catch mismatched topology IDs.
-    """
-    tp = 0   # True Positives: ID matched correctly on the closest spatial node
-    ma = 0   # Misalignments: Nearest node belongs to a completely different ID
-    fp = 0   # Ghosts: Extraneous nodes found out in blank background spaces
-    
-    total_gt = len(gt_dict)
-    if total_gt == 0:
-        return 0, 0, 0, 0.0, 0.0
-
-    # Extract ground truth arrays for KD-Tree indexing
-    gt_keys = list(gt_dict.keys())
-    gt_coords = np.array([gt_dict[k]["coord"] for k in gt_keys])
-    gt_tree = cKDTree(gt_coords)
-    
-    # Calculate a dynamic bounding threshold based on average node spacing 
-    # to separate actual pattern real-estate from blank background spaces
-    distances, _ = gt_tree.query(gt_coords, k=2)
-    avg_node_spacing = np.mean(distances[:, 1])
-    ghost_containment_threshold = avg_node_spacing * 0.75
-
-    for det_id, det_coord in detected_dict.items():
-        # Query nearest ground truth node point unconditionally
-        dist, idx = gt_tree.query(det_coord, k=1)
-        nearest_gt_key = gt_keys[idx]
-        
-        # 1. Is it out in empty space far away from the grid infrastructure?
-        if dist > ghost_containment_threshold:
-            fp += 1  # Registered a phantom point outside the pattern boundaries
-            continue
-            
-        # 2. Fact of Classification Verification:
-        if det_id == nearest_gt_key:
-            tp += 1  # Correct topological identity assigned to the correct node space
-        else:
-            ma += 1  # Topological tracking error: Wrong ID assigned to this node area
-
-    # Compute strict performance metrics using your exact formula specs
-    precision_denom = tp + ma + fp
-    precision = float(tp) / precision_denom if precision_denom > 0 else 0.0
-    recall = float(tp) / total_gt if total_gt > 0 else 0.0
-    
-    return tp, ma, fp, precision, recall
+    if tp > 0:
+        avg_dist /= tp
+    return tp, ma, fp, precision, recall, avg_dist
 
 
 # ==============================================================================
@@ -146,41 +102,54 @@ if __name__ == "__main__":
         exit(1)
         
     files = os.listdir(DATASET_DIR)
-    case_images = [f for f in files if f.startswith("case_") and f.endswith(".png")]
+    case_images = [f for f in files if f.endswith(".png")]
     case_images.sort()
     
     # Markdown Output Document Definition Block
     md_rows = [
-        "| Test Case Name | GT Nodes | True Positives (TP) | Misalignments (MA) | Ghosts (FP) | Precision | Recall |",
-        "| :--- | :---: | :---: | :---: | :---: | :---: | :---: |"
+        "| Test Case Name | GT Nodes | True Positives (TP) | Misalignments (MA) | Ghosts (FP) | Precision | Recall | Avg Dist |",
+        "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |"
     ]
     
     print("Launching Topological Integrity Audit...")
     
-    for img_name in case_images:
-        case_id = re.sub(r"^case_", "", img_name)
-        case_id = re.sub(r"\.png$", "", case_id)
-        
-        img_path = os.path.join(DATASET_DIR, img_name)
-        gt_path = os.path.join(DATASET_DIR, f"case_{case_id}_gt.txt")
-        
-        if not os.path.exists(gt_path):
-            continue
-            
-        image = cv2.imread(img_path)
-        gt_map = parse_ground_truth(gt_path)
-        
-        # Run your tracking classification algorithm
-        detected_map = detector.register_pattern(image)
-        
-        # Audit topology verification maps
-        tp, ma, fp, prec, rec = evaluate_pure_topology(gt_map, detected_map)
-        
-        row_str = f"| {case_id} | {len(gt_map)} | {tp} | {ma} | {fp} | {prec:.4f} | {rec:.4f} |"
-        md_rows.append(row_str)
-        
-    print("\n### TOPO-TRACKING PERFORMANCE RESULTS\n")
-    print("\n".join(md_rows))
-    print("\n")
+    with open(os.path.join(DATASET_DIR, "summary.md"), 'w', encoding='ascii') as f:
+        f.write("\n### TOPOLOGICAL MATCHING PERFORMANCE RESULT\n\n")
+        f.write("| Test Case Name | GT Nodes | True Positives (TP) | Misalignments (MA) | Ghosts (FP) | Precision | Recall | Avg Dist (pixels) |\n")
+        f.write("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |\n")
+        for img_name in case_images:
+            case_id = img_name[:-4]
+            img_path = os.path.join(DATASET_DIR, img_name)
+            gt_path = os.path.join(DATASET_DIR, case_id + "_gt.txt")
+
+            if not os.path.exists(gt_path):
+                continue
+            print(f"Processing test case {case_id}...")
+
+            image = cv2.imread(img_path)
+            gt_map = parse_ground_truth(gt_path)
+
+            # Run your tracking classification algorithm
+            debug_output = True
+            detected_result = detector.register_pattern(image, debug_output)
+            cv2.imwrite(os.path.join(DATASET_DIR, img_name + "-debug.png"),image)
+            detected_map = {}
+            if "topological_matrix" in detected_result:
+                points = detected_result.get("points")
+                topological_matrix = detected_result.get("topological_matrix")
+                labels = detected_result.get("labels")
+                h,w = topological_matrix.shape
+                for r in range(h):
+                    for c in range(w):
+                        point_idx = topological_matrix[r, c]
+                        if point_idx >= 0:
+                            x, y = points[point_idx]
+                            detected_map[(r,c)] = (labels[point_idx], x, y)
+
+            # Audit topology verification maps
+            tp, ma, fp, prec, rec, avg_dist = evaluate_topology(gt_map, detected_map)
+
+            f.write(f"| {case_id} | {len(gt_map)} | {tp} | {ma} | {fp} | {prec:.3f} | {rec:.3f} | {avg_dist:.1f} |\n")
+        f.write("\n")
 
 

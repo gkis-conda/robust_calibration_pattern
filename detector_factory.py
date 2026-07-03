@@ -93,12 +93,11 @@ def parse_arguments():
     if "--" in sys.argv:
         python_args = sys.argv[sys.argv.index("--") + 1:]
     else:
-        python_args = []
+        python_args = sys.argv[1:]
 
-    parser = argparse.ArgumentParser(description="TCM Benchmarking Run Parameter Controller")
+    parser = argparse.ArgumentParser(description="Benchmarking Controller")
     parser.add_argument("-e", "--engine", type=str, default="hexagonal", help="Execution Engine ('hexagonal'/'opencv')")
     parser.add_argument("-p", "--path", type=str, default="./output", help="Working folder path")
-
     parser.add_argument("-r", "--rows", type=int, default=31, help="Lattice height count")
     parser.add_argument("-c", "--cols", type=int, default=31, help="Lattice width count")
        

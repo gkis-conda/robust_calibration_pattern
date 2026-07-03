@@ -292,7 +292,7 @@ def evaluate_single_integration_case(base_blueprint: np.ndarray,
     cam_obj = ProjectiveCamera((width, height), fx_px=f_px, fy_px=f_px, cx=cx, cy=cy, k1=k1)
 
     # 3. Compute camera projection extrinsics matrix [R|t] per case profile
-    Rt = compute_camera_projection_matrix(
+    R, t = compute_camera_projection_matrix(
         roll_deg=cam_params["roll"],
         pitch_deg=cam_params["pitch"],
         yaw_deg=cam_params["yaw"],

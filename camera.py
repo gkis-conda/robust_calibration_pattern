@@ -117,6 +117,7 @@ class ProjectiveCamera:
         # 3. Deterministic Structural Boundary Profiler
         # Always computed automatically based on the distortion coefficients
         self.max_stable_radius = compute_max_radius(self.distortion_model, self.cx, self.cy, img_shape=self.img_shape)
+        print("max radius", self.max_stable_radius)
 
     def undistort(self, point):
         """
@@ -147,11 +148,10 @@ class ProjectiveCamera:
     def undistort_points(self, points):
         return [self.undistort(point) for point in points]
 
-    def compute_homography(self, Rt: np.ndarray) -> np.ndarray:
+    def compute_homography(self, R,t: np.ndarray) -> np.ndarray:
         """Computes a flat 3x3 planar Homography matrix from 3x4 extrinsics."""
-        r0 = Rt[:, 0:1]
-        r1 = Rt[:, 1:2]
-        t  = Rt[:, 3:4]
+        r0 = R[:, 0:1]
+        r1 = R[:, 1:2]
         H_ext = np.hstack([r0, r1, t])
         return self.K @ H_ext
 
@@ -162,12 +162,31 @@ class ProjectiveCamera:
         """
         return (0 <= point[0] < self.W_img and 0 <= point[1] < self.H_img)
 
-    def project_points(self, world_pts: np.ndarray, Rt: np.ndarray) -> np.ndarray:
+    def project_point(self, world_point: np.ndarray, rotation: np.ndarray, t: np.ndarray) -> np.ndarray:
+        local_point = rotation @ world_point
+        local_point[0] += t[0]
+        local_point[1] += t[1]
+        local_point[2] += t[2]
+        local_point[0] /= local_point[2]
+        local_point[1] /= local_point[2]
+        local_point[2] = 1
+        local_point = self.K @ local_point
+        x, y = local_point[0], local_point[1]
+        r = np.hypot(x  - self.cx, y  - self.cy)
+        if r >= self.max_stable_radius:
+            return None
+
+        if self.distortion_model is not None:
+            return self.distortion_model((x,y))
+
+        return x,y
+
+    def project_points(self, world_pts: np.ndarray, R: np.ndarray, t: np.ndarray) -> np.ndarray:
         """Projects 2D world space points into the distorted camera pixel plane."""
         pts = np.atleast_2d(np.array(world_pts, dtype=np.float32))
         num_pts = len(pts)
 
-        H_global = self.compute_homography(Rt)
+        H_global = self.compute_homography(R,t)
         homogeneous_world_pts = np.hstack([pts, np.ones((num_pts, 1), dtype=np.float32)])
         projected_pts = (H_global @ homogeneous_world_pts.T).T
         pixel_pts = projected_pts[:, :2] / projected_pts[:, 2:3]
@@ -233,5 +252,11 @@ def compute_camera_projection_matrix(roll_deg, pitch_deg, yaw_deg, tx=0.0, ty=0.
     t = np.array([[tx], [ty], [tz]], dtype=np.float64)
     
     # 5. Assemble Extrinsic Matrix [R | t] (size 3x4)
-    return np.hstack([R, t])
+    return R, t
 
+
+if __name__ == "__main__":
+    camera = ProjectiveCamera((100,100), 50, 50, 50, 50, -0.1)
+    yaw, pitch, roll = 4, 5, 6
+    R, t = compute_camera_projection_matrix(roll, pitch, yaw, 0, 0, -1)
+    camera.project_point((1,2,0), R, t)

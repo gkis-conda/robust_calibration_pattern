@@ -7,6 +7,7 @@ import sys
 import random
 from datetime import datetime
 
+
 # 1. Capture the exact absolute folder path where this script resides
 # (Safe for execution via relative paths or system symlinks)
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -29,11 +30,11 @@ METER_TO_MM = lambda x: float(x) * 1000.
 BLENDER_SENSOR_WIDTH_MM = 36.0                 # Standard full-frame sensor metric
 RESOLUTION_PERCENTAGE_FULL = 100               # Scale factor for target frame rendering
 Z_PLANE_FIGHTING_OFFSET_METERS = 0.001         # Slight offset to prevent mesh clipping
-CYCLES_RAYTRACING_SAMPLES = 30                 # Computation constraints limit
+CYCLES_RAYTRACING_SAMPLES = 10                # Computation constraints limit
 BLUR_EXPOSURE_SHUTTER_MAX = 1.0                # Keep shutter active across entire frame
 
 # --- JITTER MOTION CHARACTERISTICS ---
-TREMOR_DEG = 0.1                         # Sub-pixel rotational hand shake step
+TREMOR_DEG = 1./60                              # Sub-pixel rotational hand shake step
 
 # --- CAMERA PARAMETERS DEFINITIONS AND CONSTRAINTS ---
 DEFAULT_TX, DEFAULT_TY, Z_DISTANCE = 0.0, 0.0, -1.5
@@ -97,17 +98,6 @@ def calculate_lattice_global_offset(mesh_gen):
     grid_h = raw_h + 2 * step_meters
 
     return cx, cy, grid_w, grid_h
-
-
-def purge_blender_workspace():
-    """
-    Safely resets the active workspace environment layers, cleaning out
-    residual asset garbage blocks from memory.
-    """
-    if bpy.context.object and bpy.context.object.mode != 'OBJECT':
-        bpy.ops.object.mode_set(mode='OBJECT')
-    bpy.ops.object.select_all(action='SELECT')
-    bpy.ops.object.delete(use_global=False)
 
 
 def setup_studio_illumination():
@@ -227,18 +217,11 @@ def create_matte_pbr_material(name, bgr_color=(0.0, 0.0, 0.0, 1.0), roughness=0.
     return mat
 
 
-def build_3d_pattern_mesh(case_name:str, engine:str, blueprint, pattern_step_mm=20.0, primitive_radius_mm=6.0):
+def build_3d_pattern_mesh(case_name:str, mesh_gen):
     """
     Consumes the custom PhysicalMeshGenerator layout object sequence, builds
     explicit spatial vertex faces structures, and binds PBR properties.
     """    
-    mesh_gen = mesh_generator_factory(
-            engine_name=engine,
-            grid_matrix=blueprint,
-            step_mm=PATTERN_STEP_MM,
-            r_circ=PRIMITIVE_RADIUS_MM
-        )
-
     blender_mesh = bpy.data.meshes.new(f"Mesh_{case_name}")
     pattern_obj = bpy.data.objects.new(f"Obj_{case_name}", blender_mesh)
     bpy.context.collection.objects.link(pattern_obj)
@@ -251,22 +234,16 @@ def build_3d_pattern_mesh(case_name:str, engine:str, blueprint, pattern_step_mm=
     # so they rotate together under oblique stress test cases.
     all_vertices = []
     all_faces = []
-    node_centers_3d = {}
     vert_index_offset = 0
 
     for i, j, shape_type, contour in mesh_gen:
         if shape_type < 0 or not contour:
             continue
             
-        cx, cy = mesh_gen.get_shape_center(i, j)
-        # CONVERSION FACTOR: Map physical millimeter targets into Blender world meter metrics
-        node_centers_3d[(i, j)] = mathutils.Vector((MM_TO_METER(cx), MM_TO_METER(cy), 0.0))
-        
-        num_pts = len(contour)
         for pt in contour:
-            # CONVERSION FACTOR: Transforming bounding vertices stream tracking array indices
             all_vertices.append((MM_TO_METER(pt[0]), MM_TO_METER(pt[1]), 0.0))
             
+        num_pts = len(contour)
         face_indices = list(range(vert_index_offset, vert_index_offset + num_pts))
         all_faces.append(face_indices)
         vert_index_offset += num_pts
@@ -277,7 +254,7 @@ def build_3d_pattern_mesh(case_name:str, engine:str, blueprint, pattern_step_mm=
     token_mat = create_matte_pbr_material(f"Mat_Tokens_{case_name}", (0.0, 0.0, 0.0, 1.0), 0.4)
     pattern_obj.data.materials.append(token_mat)
     
-    return pattern_obj, node_centers_3d, mesh_gen.grid_matrix
+    return pattern_obj
 
 
 def setup_camera_hardware_distortion(scene, camera_obj, k1):
@@ -310,9 +287,8 @@ def setup_camera_lens_distortion(scene, k1):
     """
     Activates Blender 2.92 internal Compositing pipeline with a File Output node
     to guarantee that distorted images are written to disk during Python execution.
-    LENS DISTORTION HARDWARE CONFIGURATION LAYER
     """
-    dist_node = scene.node_tree.nodes.get("TCM_Distortion_Node")
+    dist_node = scene.node_tree.nodes.get(DISTORTION_NODE_NAME)
 
     if abs(k1) > 1e-8:
         # Distortion layer detected: activate composting pipelines and inject value
@@ -324,14 +300,6 @@ def setup_camera_lens_distortion(scene, k1):
         scene.render.use_compositing = False
         if dist_node:
             dist_node.inputs['Distort'].default_value = 0.0
-
-# Global flag to track the physical end of the render + compositor disk write
-_RENDER_BUSY = False
-
-def on_render_complete_callback(scene):
-    global _RENDER_BUSY
-    # This trigger is executed by Blender when the file is 100% written to disk
-    _RENDER_BUSY = False
 
 
 def initialize_compositor_pipeline(scene):
@@ -369,10 +337,6 @@ def initialize_compositor_pipeline(scene):
     links.new(render_layers.outputs['Image'], distortion_node.inputs['Image'])
     links.new(distortion_node.outputs['Image'], file_output_node.inputs['Image'])
 
-    # Register the handler once globally during script initialization
-    if on_render_complete_callback not in bpy.app.handlers.render_complete:
-        bpy.app.handlers.render_complete.append(on_render_complete_callback)
-
     print(" -> Compositor pipeline infrastructure initialized cleanly.")
 
 
@@ -400,16 +364,7 @@ def configure_camera(scene,
     camera_obj.data.lens_unit = 'MILLIMETERS'
     camera_obj.data.lens = (f_px * BLENDER_SENSOR_WIDTH_MM) / w_px
 
-    # Dynamic Distortion Processing State Gate Check
-    dist_node = scene.node_tree.nodes.get(DISTORTION_NODE_NAME)
-    if abs(k1) > 1e-8:
-        scene.render.use_compositing = True
-        if dist_node:
-            dist_node.inputs['Distort'].default_value = -float(k1)
-    else:
-        scene.render.use_compositing = False
-        if dist_node:
-            dist_node.inputs['Distort'].default_value = 0.0
+    setup_camera_lens_distortion(scene, k1)
 
     tx = camera_extrinsics.get("tx", 0.0)
     ty = camera_extrinsics.get("ty", 0.0)
@@ -440,7 +395,6 @@ def configure_camera(scene,
     camera_obj.location = loc
     camera_obj.rotation_mode = 'XYZ'
     camera_obj.rotation_euler = rot_quat.to_euler(camera_obj.rotation_mode)
-    print(datetime.now().time(), camera_obj.rotation_euler )
 
     camera_obj.keyframe_insert(data_path="location", frame=start_frame)
     camera_obj.keyframe_insert(data_path="rotation_euler", frame=start_frame)
@@ -463,8 +417,8 @@ def configure_camera(scene,
 
         # Calculate random gait displacements using a normal Gaussian distribution
         # centered at zero, scaled by your tremor intensity bounds
-        delta_pitch = random.gauss(0.0, TREMOR_DEG)
-        delta_yaw = random.gauss(0.0, TREMOR_DEG)
+        delta_pitch = random.uniform(-TREMOR_DEG, TREMOR_DEG)
+        delta_yaw = random.uniform(-TREMOR_DEG, TREMOR_DEG)
 
         # Accumulate the random walk offsets natively
         rolling_rot_x += math.radians(delta_pitch)
@@ -479,34 +433,48 @@ def configure_camera(scene,
     bpy.context.view_layer.update()
 
 
-def export_ground_truth_labels(scene, camera_obj, pattern_obj, node_centers_3d, grid_matrix, distort:Distortion, filepath):
+def export_ground_truth_labels(mesh_gen, labels, intrinsics, camera_extrinsics, filepath):
     """
     Computes exact sub-pixel screen space projections for each underlying 3D 
     center coordinates point vector, matching indexing arrays definitions.
     """
-    from bpy_extras.object_utils import world_to_camera_view
-    
-    w_px = scene.render.resolution_x
-    h_px = scene.render.resolution_y
-    
-    gt_lines = ["# Row, Col, Shape_Type, X_pixel, Y_pixel"]
-    
-    for (r, c), local_center in node_centers_3d.items():
-        # Compute exact world matrix position based on transformation stack
-        world_coord = pattern_obj.matrix_world @ local_center
-        co_2d = world_to_camera_view(scene, camera_obj, world_coord)
-        
-        # Absolute pixels transformations (Inverting Y bounds to follow CV specs)
-        pixel_x = co_2d.x * w_px
-        pixel_y = (1.0 - co_2d.y) * h_px  
-        
-        shape_type = grid_matrix[r, c]
-        if distort:
-            pixel_x, pixel_y = distort((pixel_x, pixel_y))
-        gt_lines.append(f"{r},{c},{shape_type},{pixel_x:.4f},{pixel_y:.4f}")
+    h, w = labels.shape
+    camera = ProjectiveCamera((intrinsics["width_px"], intrinsics["height_px"]),
+                              intrinsics["f_px"], intrinsics["f_px"],
+                              intrinsics["width_px"] / 2, intrinsics["height_px"] / 2, intrinsics["k1"])
+
+    tx = camera_extrinsics.get("tx", 0.0)
+    ty = camera_extrinsics.get("ty", 0.0)
+    tz = camera_extrinsics.get("tz", 1.0)
+    roll = math.radians(camera_extrinsics.get("roll", 0.0))
+    pitch = math.radians(camera_extrinsics.get("pitch", 0.0))
+    yaw = math.radians(camera_extrinsics.get("yaw", 0.0))
+
+    gt_lines = []
+    R, t = compute_camera_projection_matrix(roll, pitch, yaw, METER_TO_MM(tx), METER_TO_MM(ty), METER_TO_MM(tz))
+    R = R.T
+    t = -(R @ t)
+
+   # min_x_mm, min_y_mm = mesh_gen.get_shape_center(0, 0)
+   # max_x_mm, max_y_mm = mesh_gen.get_shape_center(h - 1, w - 1)
+   # cx_mm = (max_x_mm + min_x_mm)/2
+   # cy_mm = (max_y_mm + min_y_mm)/2
+    for r in range(h):
+        for c in range(w):
+            shape_type = labels[r, c]
+            if shape_type < 0:
+                continue
+
+            x_mm, y_mm = mesh_gen.get_shape_center(r, c)
+            transformed = camera.project_point(np.asarray([x_mm, y_mm, 0]), R, t)
+            if transformed is not None:
+                if camera.is_visible(transformed):
+                    gt_lines.append(f"{r},{c},{shape_type},{transformed[0]:.3f},{transformed[1]:.3f}")
         
     with open(filepath, "w") as f:
+        f.write("#Row, Col, Type, x, y\n")
         f.write("\n".join(gt_lines))
+        f.write("\n")
 
 
 def cleanup_pattern_instance(pattern_obj):
@@ -522,46 +490,11 @@ def cleanup_pattern_instance(pattern_obj):
 # SYSTEM CONTEXT: render() Loop Execution Update Pass
 # =====================================================================
 
+
 def render(scene, base_output_path, case_name, start_frame: int):
     """
-    Standalone rendering pipeline executor. Forces strict blocking file-writes
-    by flinging the dependency graph cache parameters clear on every step.
-    """
-    # 1. Force the timeline pointer directly onto the case's allocated slot
-    scene.frame_set(start_frame)
-
-    # 2. THE CRITICAL MATRIX SHIELD: Force Blender to evaluate the graph IMMEDIATELY.
-    # This locks down the specific camera rotation in C++ engine memory before rendering.
-    bpy.context.view_layer.update()
-    bpy.context.evaluated_depsgraph_get()
-
-    if scene.render.use_compositing:
-        file_out_node = scene.node_tree.nodes.get(FILE_OUTPUT_NAME)
-        if file_out_node:
-            file_out_node.base_path = base_output_path
-            file_out_node.file_slots[0].path = f"{case_name}_"  # Generates case_name_####.png
-
-        print(f" -> [CLI] Active Render: Starting Compositor for {case_name} at Frame {start_frame}")
-
-        # Trigger blocking render pass
-        bpy.ops.render.render(write_still=False)
-
-    else:
-        # Standard unwarped direct engine layout path
-        native_output_target = os.path.join(base_output_path, f"{case_name}_{start_frame:04d}.png")
-        scene.render.filepath = native_output_target
-
-        print(f" -> [CLI] Active Render: Processing Core Route for {case_name} at Frame {start_frame}")
-        bpy.ops.render.render(write_still=True)
-
-
-def render_sync(scene, base_output_path, case_name, start_frame: int):
-    """
-    ASCII-compatible synchronous rendering executor for Blender CLI execution (-b).
     Forces Python to halt until the Compositor thread completely writes files to disk.
     """
-    global _RENDER_BUSY
-
     # 1. Force the timeline context onto the required target frame
     scene.frame_set(start_frame)
 
@@ -582,16 +515,11 @@ def render_sync(scene, base_output_path, case_name, start_frame: int):
         print(f" -> [CLI] Active Render: Starting Compositor for {case_name} at Frame {start_frame}")
 
         # Lock the execution thread state before triggering the render operator
-        _RENDER_BUSY = True
         bpy.ops.render.render(write_still=False)
-
-        # BLOCKING LOOP: Hold the Python CLI thread until the compositor thread finishes writing
-        while _RENDER_BUSY:
-            time.sleep(0.1)  # Check every 20 milliseconds to minimize latency
 
     else:
         # Native rendering pipeline automatically blocks the main thread when write_still=True
-        native_output_target = os.path.abspath(os.path.join(base_output_path, f"{case_name}_0001.png"))
+        native_output_target = os.path.abspath(os.path.join(base_output_path, f"{case_name}_{start_frame:04d}.png"))
         scene.render.filepath = native_output_target
 
         print(f" -> [CLI] Active Render: Starting Native Engine for {case_name} at Frame {start_frame}")
@@ -656,17 +584,19 @@ if __name__ == "__main__":
     # Step 2: Iterate across individual structured test dictionary cases sequential matrices loops
     for case_name, data in cases.items():
         print(f"\nProcessing Test Case: [{case_name}] - {data['description']}")
-        
-        # Step 3: Parse blueprint topology and construct discrete 3D node array structures via lambda macro
-        pattern_obj, centers_3d, matrix_state = build_3d_pattern_mesh(
-            case_name=case_name,
-            engine=args.engine,
-            blueprint=data["blueprint"],
-            pattern_step_mm=PATTERN_STEP_MM,
-            primitive_radius_mm=PRIMITIVE_RADIUS_MM
+
+        mesh_gen = mesh_generator_factory(
+            engine_name=args.engine,
+            grid_matrix=data["blueprint"],
+            step_mm=PATTERN_STEP_MM,
+            r_circ=PRIMITIVE_RADIUS_MM
         )
 
-        # 2. Stage 1: Configure camera transformations on an isolated timeline channel slot
+        pattern_obj = build_3d_pattern_mesh(
+            case_name=case_name,
+            mesh_gen=mesh_gen
+        )
+
         configure_camera(
             scene=scene_inst,
             camera_obj=cam_inst,
@@ -676,23 +606,18 @@ if __name__ == "__main__":
             tremor_frame_delta = TREMOR_FRAMES_NUM
         )
 
-        # 3. Stage 2: Execute rendering pass locked exactly on that frame context position
-        render_sync(
+        render(
             scene=scene_inst,
             base_output_path=ENGINE_SPECIFIC_DIR,
             case_name=case_name,
             start_frame=rolling_frame
         )
-        rolling_frame += 1 + TREMOR_FRAMES_NUM
-        # Step 6: Process ground truth sub-pixel coordinates text output configurations mappings
-        distortion = None
-        intrinsics = data["intrinsics"]
-        if "k1" in intrinsics:
-            distortion = Distortion(intrinsics["width_px"]/2, intrinsics["height_px"]/2, intrinsics["f_px"], intrinsics["k1"])
-        txt_out_path = os.path.join(ENGINE_SPECIFIC_DIR, f"{case_name}_gt.txt")
-        export_ground_truth_labels(scene_inst, cam_inst, pattern_obj, centers_3d, matrix_state, distortion, txt_out_path)
-        
-        # Step 7: Clear operational context before launching trailing array cases iterations
+        # Clear operational context before launching trailing array cases iterations
         cleanup_pattern_instance(pattern_obj)
+
+        # Process ground truth sub-pixel coordinates text output configurations mappings
+        txt_out_path = os.path.join(ENGINE_SPECIFIC_DIR, f"{case_name}_{rolling_frame:04d}_gt.txt")
+        export_ground_truth_labels(mesh_gen, data["blueprint"], data["intrinsics"], data["camera"], txt_out_path)
+        rolling_frame += 1 + TREMOR_FRAMES_NUM
 
     print(f"\n[SUCCESS] Completed automated modular cases execution loop inside directory: {ENGINE_SPECIFIC_DIR}")
