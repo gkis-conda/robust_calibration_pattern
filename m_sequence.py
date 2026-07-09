@@ -655,7 +655,7 @@ class MSequenceAnalyzer:
             "origin_stream_phase": initial_phase,
             "recovered_sequence": working_seq.tolist(),
             "errors_corrected": error_idxs,
-            "missing_gaps": unknown_indices.size,
+            "missing_gaps": unknown_indices,
             "status": status_msg
         }
 

@@ -2,51 +2,6 @@ import numpy as np
 # =========================================================================
 # CORE TOPOLOGICAL TRANSFORMATION MODULE
 # =========================================================================
-
-def normalize_barycentric_(u: int, v: int, lfsr_period: int) -> tuple:
-    """
-    Normalizes raw phases (u, v) into the canonical
-    base grid coordinate viewport (row, col) by resolving phase ambiguity.
-
-    Implements strict hexagonal boundary rules to handle row-pair parities
-    and signed U grid shifts inside the Galois Field period class loop.
-
-    Fully ASCII-compliant implementation.
-
-    Args:
-        u (int): Raw algebraic coordinate along the U-axis.
-        v (int): Raw algebraic coordinate along the V-axis.
-        lfsr_period (int): The sequence repetition cycle span (default 31).
-
-    Returns:
-        tuple: (r, c) mapped coordinates inside the master blueprint matrix.
-    """
-    # Rule 1: Row coordinate v is aprioristically positive because v = r and r >= 0.
-    # If a rotation or window tracking offset drops v below zero, we apply
-    # a positive modulo period shift to pull it back into the visible semi-space.
-    v = v % lfsr_period
-
-    # Ensure u is mapped within the base positive residue class before applying gates
-
-    # Rule 2 & 3: Resolve the true spatial sign of u relative to the row parallax
-    # The threshold boundary is governed by the staggered staircase floor factor (v // 2)
-    r = v
-
-    # Calculate the test column index assuming a positive phase assignment
-    c_candidate =  u + (v // 2)
-
-    # If the candidate column leaks past the physical matrix boundaries,
-    # it confirms that u belongs in the negative coordinate space (r > c condition)
-    if c_candidate < 0:
-        c = u%lfsr_period +(v//2)
-    elif c_candidate >= lfsr_period:
-        c = (u - lfsr_period) +(v//2)
-    else:
-        c = c_candidate
-
-    return r, c
-
-
 def normalize_barycentric(u_linear: int, v_linear: int, lfsr_period: int = 31) -> tuple:
     """
     Normalizes continuous linear barycentric coordinates (u, v) into the canonical
@@ -55,29 +10,19 @@ def normalize_barycentric(u_linear: int, v_linear: int, lfsr_period: int = 31) -
     Enforces a strict two-sided algebraic residue wrapper to prevent bottom-left
     corner clipping and index compression under extreme rotation shifts.
     """
-    # 1. Bring both independent linear parameters into their positive residue rings
-    # This completely insulates the boundary tracking loops from sign inversions
     v_canonical = int(v_linear) % lfsr_period
     u_canonical = int(u_linear) % lfsr_period
 
-    # 2. THE AIRTIGHT TWO-SIDED CHESS GATE
-    # Map the combined rhomboid footprint properties symmetrically across both edges
     combined_envelope = u_canonical + (v_canonical // 2)
 
     if combined_envelope >= lfsr_period:
         # Resolve rightward and bottom-right overflow leaks
         u_canonical -= lfsr_period
-    elif combined_envelope < 0:
-        # Resolve leftward and bottom-left underflow drops
-        u_canonical += lfsr_period
 
     # 3. Reconstruct definitive absolute matrix indices safely
     r_matrix = v_canonical
     c_matrix = u_canonical + (v_canonical // 2)
-
-    # Double-check safety limits before passing out to the mapping canvas sheet
-    # If a extreme warp still leaks past constraints, force a safe wrap
-    c_matrix = c_matrix % lfsr_period
+    assert c_matrix >= 0
 
     return r_matrix, c_matrix
 
