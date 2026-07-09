@@ -10,29 +10,19 @@ def normalize_barycentric(u_linear: int, v_linear: int, lfsr_period: int = 31) -
     Enforces a strict two-sided algebraic residue wrapper to prevent bottom-left
     corner clipping and index compression under extreme rotation shifts.
     """
-    # 1. Bring both independent linear parameters into their positive residue rings
-    # This completely insulates the boundary tracking loops from sign inversions
     v_canonical = int(v_linear) % lfsr_period
     u_canonical = int(u_linear) % lfsr_period
 
-    # 2. THE AIRTIGHT TWO-SIDED CHESS GATE
-    # Map the combined rhomboid footprint properties symmetrically across both edges
     combined_envelope = u_canonical + (v_canonical // 2)
 
     if combined_envelope >= lfsr_period:
         # Resolve rightward and bottom-right overflow leaks
         u_canonical -= lfsr_period
-    elif combined_envelope < 0:
-        # Resolve leftward and bottom-left underflow drops
-        u_canonical += lfsr_period
 
     # 3. Reconstruct definitive absolute matrix indices safely
     r_matrix = v_canonical
     c_matrix = u_canonical + (v_canonical // 2)
-
-    # Double-check safety limits before passing out to the mapping canvas sheet
-    # If a extreme warp still leaks past constraints, force a safe wrap
-    c_matrix = c_matrix % lfsr_period
+    assert c_matrix >= 0
 
     return r_matrix, c_matrix
 

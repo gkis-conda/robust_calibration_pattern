@@ -8,7 +8,7 @@ import os
 
 ENGINE_FULL_NAME = "Galois Field Pattern Matching Engine"
 
-def render_warped_grid_shapes(mesh_generator, cam: ProjectiveCamera, Rt: np.ndarray) -> np.ndarray:
+def render_warped_grid_shapes(mesh_generator, cam: ProjectiveCamera, R: np.ndarray, t: np.ndarray) -> np.ndarray:
     """
     STAGE 3b: LOCAL WARP RENDERING WITH ACCURATE RADIAL LOOKUP FILTERING
     Draws shapes onto the camera viewport by projectively transforming every
@@ -28,7 +28,7 @@ def render_warped_grid_shapes(mesh_generator, cam: ProjectiveCamera, Rt: np.ndar
 
         # RE-USE OBJECT COMPONENT: Offload all projection transformations,
         # homography math, and radius guardrail intercept checks to the class!
-        pixel_pts = cam.project_points(world_pts, Rt)
+        pixel_pts = cam.project_points(world_pts, R, t)
 
         # If any single vertex broke past the stable limit radius, the camera
         # class safely returns None, and we drop this truncated edge node cleanly.
@@ -134,7 +134,7 @@ def calculate_reconstruction_metrics(topological_matrix: np.ndarray,
                                      modified_blueprint: np.ndarray,
                                      generator,
                                      camera,
-                                     Rt: np.ndarray,
+                                     R: np.ndarray, t: np.ndarray,
                                      max_matching_dist_px: float = 4.0) -> dict:
     """
     Computes precise performance and topological divergence statistics by building
@@ -187,7 +187,7 @@ def calculate_reconstruction_metrics(topological_matrix: np.ndarray,
 
             # Query the precise non-warped world coordinate center from the generator
             node_world_center = generator.get_shape_center(r_true, c_true)
-            pixel_pts = camera.project_points(node_world_center, Rt)
+            pixel_pts = camera.project_points(node_world_center, R, t)
 
             # Enforce native viewport camera visibility clipping walls
             if pixel_pts is None:
@@ -305,7 +305,7 @@ def evaluate_single_integration_case(base_blueprint: np.ndarray,
     generator = PhysicalMeshGenerator(blueprint, STEP_PX, STEP_PX / 5)
 
     # Render the frame cleanly using our short object component pipeline
-    img = render_warped_grid_shapes(generator, cam_obj, Rt)
+    img = render_warped_grid_shapes(generator, cam_obj, R, t)
 
     # Optional image saving gate
     if save_images:
@@ -318,7 +318,8 @@ def evaluate_single_integration_case(base_blueprint: np.ndarray,
         base_blueprint=blueprint,
         generator=generator,
         camera=cam_obj,
-        Rt=Rt
+        R = R,
+        t= t
     )
 
     pts, labels = detect_and_classify_grid_nodes(img)
@@ -356,7 +357,7 @@ def evaluate_single_integration_case(base_blueprint: np.ndarray,
             modified_blueprint = blueprint,
             generator=generator,
             camera=cam_obj,
-            Rt=Rt,
+            R = R, t=t,
             legend_position = "bottom_right"
         )
         # Save the diagnostic visualization matrix directly to disk
@@ -372,7 +373,7 @@ def evaluate_single_integration_case(base_blueprint: np.ndarray,
         modified_blueprint=blueprint,
         generator=generator,
         camera=cam_obj,
-        Rt=Rt
+        R = R, t=t
     )
 
     metrics["status"] = "success"
@@ -385,7 +386,7 @@ def evaluate_single_integration_case(base_blueprint: np.ndarray,
 def compute_visible_blueprint(base_blueprint: np.ndarray,
                               generator,
                               camera: ProjectiveCamera,
-                              Rt: np.ndarray) -> np.ndarray:
+                              R: np.ndarray, t: np.ndarray) -> np.ndarray:
     """
     Evaluates node visibility on the sensor array using the ProjectiveCamera class objects.
     """
@@ -400,7 +401,7 @@ def compute_visible_blueprint(base_blueprint: np.ndarray,
 
             # Retrieve node world position coordinates from the generator module
             node_world_center = generator.get_shape_center(r, c)
-            pixel_pts = camera.project_points(node_world_center, Rt)
+            pixel_pts = camera.project_points(node_world_center, R, t)
 
             if pixel_pts is None or not camera.is_visible(pixel_pts[0]):
                 visible_blueprint[r, c] = -1
@@ -501,7 +502,7 @@ def render_telemetry_grid_overlay(frame: np.ndarray,
                                   modified_blueprint: np.ndarray,
                                   generator,
                                   camera,
-                                  Rt: np.ndarray,
+                                  R: np.ndarray, t: np.ndarray,
                                   legend_position = None, max_matching_dist_px: float = 4.0) -> np.ndarray:
     """
     Renders an inverted color-coded diagnostic geometric overlay by building a
@@ -535,7 +536,7 @@ def render_telemetry_grid_overlay(frame: np.ndarray,
             for c_true in range(W_nodes):
                 if base_blueprint[r_true, c_true] >= 0 and modified_blueprint[r_true, c_true] < 0:
                     node_world_center = generator.get_shape_center(r_true, c_true)
-                    pixel_pts = camera.project_points(node_world_center, Rt)
+                    pixel_pts = camera.project_points(node_world_center, R, t)
                     if pixel_pts is not None and camera.is_visible(pixel_pts):
                         cv2.circle(overlay_canvas, (int(np.round(pixel_pts[0])), int(np.round(pixel_pts[1]))),
                                    5, (255, 0, 255), -1, lineType=cv2.LINE_AA)
@@ -554,7 +555,7 @@ def render_telemetry_grid_overlay(frame: np.ndarray,
 
             # Query the spatial model center point from the generator
             node_world_center = generator.get_shape_center(r_true, c_true)
-            pixel_pts = camera.project_points(node_world_center, Rt)
+            pixel_pts = camera.project_points(node_world_center, R, t)
 
             # Filter out points that fall outside your exact camera viewport boundary pass
             if pixel_pts is None:
@@ -766,8 +767,8 @@ def save_summary_markdown_report(results_dict: dict,
     md_content = []
     md_content.append("# Pattern Registration Performance Summary")
 
-    md_content.append("| Case Name | Scenario Comment Description | Visible Targets | Recall | Precision | Status |")
-    md_content.append("| :--- | :--- | :---: | :---: | :---: | :---: |")
+    md_content.append("| Case Name | Scenario Comment Description | Visible Targets | Recall | Precision | Accuracy| Status |")
+    md_content.append("| :--- | :--- | :---: | :---: | :---: | :---: | :---: |")
 
     total_cases = len(results_dict)
     passed_cases = 0
@@ -801,7 +802,7 @@ def save_summary_markdown_report(results_dict: dict,
 
         # Append row format block string data line directly
         md_content.append(
-            f"| **{case_name}** | {comment} | {visible} | {recall_pct:.2f}% | {precision_pct:.2f}% | {status_tag} |"
+            f"| **{case_name}** | {comment} | {visible} | {recall_pct:.2f}% | {precision_pct:.2f}% | {accuracy:.2f} | {status_tag} |"
         )
 
     # 4. Append high-level global system telemetry metrics
@@ -838,7 +839,7 @@ if __name__ == "__main__":
     W_NODES, H_NODES = 31, 31
 
     STEP_PX = 45.0
-    Z_DISTANCE = H_NODES * STEP_PX * 1.1
+    Z_DISTANCE = -H_NODES * STEP_PX * 1.1
     DEFAULT_TX = 0
     DEFAULT_TY = 0
     IMG_SHAPE = (1080, 1920)

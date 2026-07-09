@@ -5,7 +5,7 @@ import os
 import numpy as np
 import sys
 import random
-from datetime import datetime
+import cv2
 
 
 # 1. Capture the exact absolute folder path where this script resides
@@ -29,8 +29,8 @@ METER_TO_MM = lambda x: float(x) * 1000.
 # --- FIXED HARDWARE AND ENVIRONMENTAL CONSTANTS ---
 BLENDER_SENSOR_WIDTH_MM = 36.0                 # Standard full-frame sensor metric
 RESOLUTION_PERCENTAGE_FULL = 100               # Scale factor for target frame rendering
-Z_PLANE_FIGHTING_OFFSET_METERS = 0.001         # Slight offset to prevent mesh clipping
-CYCLES_RAYTRACING_SAMPLES = 10                # Computation constraints limit
+Z_PLANE_FIGHTING_OFFSET_METERS = 0.0001        # Slight offset to prevent mesh clipping
+CYCLES_RAYTRACING_SAMPLES = 18                 # Computation constraints limit
 BLUR_EXPOSURE_SHUTTER_MAX = 1.0                # Keep shutter active across entire frame
 
 # --- JITTER MOTION CHARACTERISTICS ---
@@ -38,7 +38,7 @@ TREMOR_DEG = 1./60                              # Sub-pixel rotational hand shak
 
 # --- CAMERA PARAMETERS DEFINITIONS AND CONSTRAINTS ---
 DEFAULT_TX, DEFAULT_TY, Z_DISTANCE = 0.0, 0.0, -1.5
-K1_DISTORTION = -0.1
+K1_DISTORTION = -0.2
 IMG_SHAPE = (1080, 1920)
 
 # --- PATTERN PARAMETERS
@@ -68,6 +68,8 @@ MATTE_PAPER_ROUGHNESS = 0.6                    # Realistic diffuse micro-texture
 MATTE_PAPER_SPECULAR = 0.1                     # Low glancing reflectance gloss index
 FILE_OUTPUT_NAME = "TCM_File_Output"
 DISTORTION_NODE_NAME = "TCM_Distortion_Node"
+
+
 # ==============================================================================
 # PIPELINE FUNCTIONS WITH EXPLICIT CONSTANTS MAPPING
 # ==============================================================================
@@ -201,6 +203,7 @@ def initialize_blender_scene(samples=CYCLES_RAYTRACING_SAMPLES, shutter_speed=BL
     camera_obj = bpy.context.active_object
     camera_obj.name = "Benchmark_Optical_Sensor"
     scene.camera = camera_obj
+    scene.render.use_compositing = False
 
     return scene, camera_obj
 
@@ -283,63 +286,6 @@ def setup_camera_hardware_distortion(scene, camera_obj, k1):
     camera_obj.data.cycles.fisheye_lens_polynomial_k2 = 0.0
 
 
-def setup_camera_lens_distortion(scene, k1):
-    """
-    Activates Blender 2.92 internal Compositing pipeline with a File Output node
-    to guarantee that distorted images are written to disk during Python execution.
-    """
-    dist_node = scene.node_tree.nodes.get(DISTORTION_NODE_NAME)
-
-    if abs(k1) > 1e-8:
-        # Distortion layer detected: activate composting pipelines and inject value
-        if dist_node:
-            scene.render.use_compositing = True
-            dist_node.inputs['Distort'].default_value = -float(k1)
-    else:
-        # No distortion present in metrics: clean reset to zero and deactivate compositor flag
-        scene.render.use_compositing = False
-        if dist_node:
-            dist_node.inputs['Distort'].default_value = 0.0
-
-
-def initialize_compositor_pipeline(scene):
-    """
-    Allocates the required file output and distortion nodes exactly once
-    at the script barrier checkpoint to prevent runtime memory leaks.
-    """
-    scene.use_nodes = True
-    tree = scene.node_tree
-    tree.nodes.clear()  # Clear default template nodes safely once
-
-    # Instantiate required execution nodes
-    render_layers = tree.nodes.new(type='CompositorNodeRLayers')
-
-    distortion_node = tree.nodes.new(type='CompositorNodeLensdist')
-    distortion_node.name = DISTORTION_NODE_NAME
-    if hasattr(distortion_node,"use_project"):
-        distortion_node.use_project = False
-    elif hasattr(distortion_node,"use_fit"):
-        distortion_node.use_fit = False
-    if hasattr(distortion_node,"use_jitter"):
-        distortion_node.use_jitter = True
-
-    file_output_node = tree.nodes.new(type='CompositorNodeOutputFile')
-    file_output_node.name = FILE_OUTPUT_NAME
-    file_output_node.label = FILE_OUTPUT_NAME
-    # Explicit Image Format Specifications
-    file_output_node.format.file_format = 'PNG'
-    file_output_node.format.color_mode = 'RGB'
-    file_output_node.format.color_depth = '8'
-    file_output_node.format.compression = 15
-
-    # Link the node network pipeline array permanently
-    links = tree.links
-    links.new(render_layers.outputs['Image'], distortion_node.inputs['Image'])
-    links.new(distortion_node.outputs['Image'], file_output_node.inputs['Image'])
-
-    print(" -> Compositor pipeline infrastructure initialized cleanly.")
-
-
 def configure_camera(scene,
                      camera_obj,
                      intrinsics: dict,
@@ -354,17 +300,15 @@ def configure_camera(scene,
     w_px = intrinsics["width_px"]
     h_px = intrinsics["height_px"]
     f_px = intrinsics["f_px"]
-    k1 = intrinsics.get("k1", 0.0)
 
-    scene.render.resolution_x = w_px
-    scene.render.resolution_y = h_px
+    scene.render.resolution_x = w_px * 1.2
+    scene.render.resolution_y = h_px * 1.2
     scene.render.resolution_percentage = RESOLUTION_PERCENTAGE_FULL
 
     camera_obj.data.type = 'PERSP'
+    camera_obj.data.sensor_fit = 'HORIZONTAL'
     camera_obj.data.lens_unit = 'MILLIMETERS'
-    camera_obj.data.lens = (f_px * BLENDER_SENSOR_WIDTH_MM) / w_px
-
-    setup_camera_lens_distortion(scene, k1)
+    camera_obj.data.lens = (f_px * BLENDER_SENSOR_WIDTH_MM) / scene.render.resolution_x
 
     tx = camera_extrinsics.get("tx", 0.0)
     ty = camera_extrinsics.get("ty", 0.0)
@@ -399,9 +343,6 @@ def configure_camera(scene,
     camera_obj.keyframe_insert(data_path="location", frame=start_frame)
     camera_obj.keyframe_insert(data_path="rotation_euler", frame=start_frame)
 
-    # -----------------------------------------------------------------
-    # MULTI-FRAME PSEUDO-RANDOM WALK SEGMENT
-    # -----------------------------------------------------------------
     # Freeze the random state vector seed using your case index to guarantee 100%
     # repeatable, deterministic noise paths across regression test sweeps.
     random.seed(start_frame)
@@ -428,7 +369,6 @@ def configure_camera(scene,
         camera_obj.rotation_euler = (rolling_rot_x, rolling_rot_y, rolling_rot_z)
         camera_obj.keyframe_insert(data_path="rotation_euler", frame=target_frame_idx)
 
-    # Return timeline context back to the case's base frame so the shutter captures the velocity path
     scene.frame_set(start_frame)
     bpy.context.view_layer.update()
 
@@ -441,24 +381,18 @@ def export_ground_truth_labels(mesh_gen, labels, intrinsics, camera_extrinsics, 
     h, w = labels.shape
     camera = ProjectiveCamera((intrinsics["width_px"], intrinsics["height_px"]),
                               intrinsics["f_px"], intrinsics["f_px"],
-                              intrinsics["width_px"] / 2, intrinsics["height_px"] / 2, intrinsics["k1"])
+                              intrinsics["width_px"] / 2, intrinsics["height_px"] / 2,
+                              intrinsics["k1"])
 
     tx = camera_extrinsics.get("tx", 0.0)
     ty = camera_extrinsics.get("ty", 0.0)
     tz = camera_extrinsics.get("tz", 1.0)
-    roll = math.radians(camera_extrinsics.get("roll", 0.0))
-    pitch = math.radians(camera_extrinsics.get("pitch", 0.0))
-    yaw = math.radians(camera_extrinsics.get("yaw", 0.0))
+    roll = camera_extrinsics.get("roll", 0.0)
+    pitch = camera_extrinsics.get("pitch", 0.0)
+    yaw = camera_extrinsics.get("yaw", 0.0)
 
-    gt_lines = []
-    R, t = compute_camera_projection_matrix(roll, pitch, yaw, METER_TO_MM(tx), METER_TO_MM(ty), METER_TO_MM(tz))
-    R = R.T
-    t = -(R @ t)
-
-   # min_x_mm, min_y_mm = mesh_gen.get_shape_center(0, 0)
-   # max_x_mm, max_y_mm = mesh_gen.get_shape_center(h - 1, w - 1)
-   # cx_mm = (max_x_mm + min_x_mm)/2
-   # cy_mm = (max_y_mm + min_y_mm)/2
+    gt_points = []
+    rotation, t = compute_camera_projection_matrix(roll, pitch, yaw, METER_TO_MM(tx), METER_TO_MM(ty), METER_TO_MM(tz))
     for r in range(h):
         for c in range(w):
             shape_type = labels[r, c]
@@ -466,14 +400,14 @@ def export_ground_truth_labels(mesh_gen, labels, intrinsics, camera_extrinsics, 
                 continue
 
             x_mm, y_mm = mesh_gen.get_shape_center(r, c)
-            transformed = camera.project_point(np.asarray([x_mm, y_mm, 0]), R, t)
+            transformed = camera.project_point(np.asarray([x_mm, y_mm, 0]), rotation, t)
             if transformed is not None:
                 if camera.is_visible(transformed):
-                    gt_lines.append(f"{r},{c},{shape_type},{transformed[0]:.3f},{transformed[1]:.3f}")
-        
+                    gt_points.append(f"{r},{c},{shape_type},{transformed[0]:.3f},{transformed[1]:.3f}")
+
     with open(filepath, "w") as f:
         f.write("#Row, Col, Type, x, y\n")
-        f.write("\n".join(gt_lines))
+        f.write("\n".join(gt_points))
         f.write("\n")
 
 
@@ -484,11 +418,6 @@ def cleanup_pattern_instance(pattern_obj):
     mesh_data = pattern_obj.data
     bpy.data.objects.remove(pattern_obj, do_unlink=True)
     bpy.data.meshes.remove(mesh_data)
-
-
-# =====================================================================
-# SYSTEM CONTEXT: render() Loop Execution Update Pass
-# =====================================================================
 
 
 def render(scene, base_output_path, case_name, start_frame: int):
@@ -513,8 +442,6 @@ def render(scene, base_output_path, case_name, start_frame: int):
             file_out_node.update()
 
         print(f" -> [CLI] Active Render: Starting Compositor for {case_name} at Frame {start_frame}")
-
-        # Lock the execution thread state before triggering the render operator
         bpy.ops.render.render(write_still=False)
 
     else:
@@ -526,6 +453,51 @@ def render(scene, base_output_path, case_name, start_frame: int):
         bpy.ops.render.render(write_still=True)
 
     print(f" -> [CLI] Success: Pipeline finished processing {case_name}.\n")
+
+
+def apply_distortion(image_name, camera_inst, output_path):
+    """
+    Loads a Blender image buffer directly into a NumPy array, applies
+    a custom distortion method, and pushes the modified buffer back
+    into Blender for saving.
+    """
+    blender_image = bpy.data.images.load(output_path, check_existing=True)
+    if not blender_image:
+        print("Error: Blender image block '{}' not found.".format(image_name))
+        return
+
+    # 2. Extract resolution properties from the container
+    width, height = blender_image.size
+
+    # Blender stores image pixels as a flat float32 array of RGBA values [0.0 to 1.0]
+    # Total array length is always Width * Height * 4
+    total_floats = width * height * 4
+    pixels_flat = np.empty(total_floats, dtype=np.float32)
+
+    # Direct high-speed C-level block memory copy into the NumPy array
+    blender_image.pixels.foreach_get(pixels_flat)
+
+    # Reshape the flat vector to a standard image shape matrix (H, W, 4)
+    img_rgba = pixels_flat.reshape((height, width, 4))
+
+    # Flip vertically to align with your standard projection math coordinates
+    img_rgba = np.flipud(img_rgba)
+    distorted_rgba = distort_image_via_undistort_grid(img_rgba, camera_inst)
+    # Flip back vertically to restore Blender's native orientation
+    distorted_rgba = np.flipud(distorted_rgba)
+
+    # Flatten the matrix back to a 1D vector before writing to Blender
+    pixels_flat_out = distorted_rgba.ravel()
+    blender_image = bpy.data.images.new("NewBuffer", camera_inst.img_shape[0],camera_inst.img_shape[1])
+    # Direct high-speed C-level block memory write back into Blender's core
+    blender_image.pixels.foreach_set(pixels_flat_out)
+
+    # Update the internal image state and force the UI to redraw if necessary
+    blender_image.update()
+    blender_image.filepath_raw = output_path
+    blender_image.save()
+    bpy.data.images.remove(blender_image)
+    print("-> Successfully processed and saved frame at: {}".format(output_path))
 
 
 # ==============================================================================
@@ -568,7 +540,7 @@ if __name__ == "__main__":
     }
     # Dynamically populate each of the 6 canonical 60-degree roll positions
     for step_idx in range(1, 6):
-        target_roll = float(step_idx * 60)
+        target_roll = step_idx * 60.
         cases[f"roll_{int(target_roll)}"] = {
             "description": f"Strict {int(target_roll)}-Degree Roll Skew Around Optical Axis",
             "blueprint": np.copy(base_blueprint),
@@ -576,12 +548,12 @@ if __name__ == "__main__":
                        "tz": Z_DISTANCE},
             "intrinsics": intrinsics
         }
-    # Step 1: Uniform global environment initialization phase
+
     scene_inst, cam_inst = initialize_blender_scene()
-    initialize_compositor_pipeline(scene_inst)
+
     rolling_frame = 1
     TREMOR_FRAMES_NUM = 2
-    # Step 2: Iterate across individual structured test dictionary cases sequential matrices loops
+    # Iterate across individual structured test dictionary cases sequential matrices loops
     for case_name, data in cases.items():
         print(f"\nProcessing Test Case: [{case_name}] - {data['description']}")
 
@@ -612,6 +584,12 @@ if __name__ == "__main__":
             case_name=case_name,
             start_frame=rolling_frame
         )
+        img_out_path = os.path.join(ENGINE_SPECIFIC_DIR, f"{case_name}_{rolling_frame:04d}.png")
+        camera = ProjectiveCamera((intrinsics["width_px"], intrinsics["height_px"]),
+                                  intrinsics["f_px"], intrinsics["f_px"],
+                                  intrinsics["width_px"] / 2, intrinsics["height_px"] / 2,
+                                  intrinsics["k1"])
+        apply_distortion(img_out_path, camera, img_out_path)
         # Clear operational context before launching trailing array cases iterations
         cleanup_pattern_instance(pattern_obj)
 

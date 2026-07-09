@@ -60,7 +60,7 @@ def detect_and_classify_grid_nodes(img, min_area=15, max_area=5000, epsilon_coef
         area = cv2.contourArea(contour)
         
         # 1. Broad Area Gate
-        if not (float(min_area) < area < float(max_area)):
+        if not (min_area < area < max_area):
             continue
             
         perimeter = cv2.arcLength(contour, True)
@@ -87,7 +87,7 @@ def detect_and_classify_grid_nodes(img, min_area=15, max_area=5000, epsilon_coef
         solidity = area / hull_area if hull_area > 0 else 0
         
         # 4. Dynamic Thresholding Noise Filter
-        if solidity < 0.82 or circularity < 0.35 or circularity > 1.20:
+        if solidity < 0.82 or circularity < ideal_tri_circularity * 0.5  or circularity > ideal_circle_circularity * 1.20:
             continue  
             
         # 5. Continuous Distance Classifier
@@ -328,16 +328,19 @@ class HexagonalTopologyDetector:
             if debug_overlay:
                 visualize_reconstructed_grid(img, island, pts)
             island_label_map = map_matrix_indices(island, labels)
-            match_result = localize_grid(island_label_map, width, height)
+            match_result = localize_grid(island_label_map, width, height, True)
             if match_result is not None:
                 matches.append(match_result)
                 map_island_indices_to_blueprint(island, match_result, topological_matrix)
 
-        wiped_ghosts = verify_and_cleanse_topological_matrix(
-                topological_matrix, generate_triangular_gray_grid(width, height), labels)
-        result["matches"] = matches
         if len(matches) > 0:
-            result["topological_matrix"] = topological_matrix
+            wiped_ghosts = verify_and_cleanse_topological_matrix(
+                topological_matrix, generate_triangular_gray_grid(width, height), labels)
+            result["matches"] = matches
+            if wiped_ghosts > len(labels) / 2:
+                print("Too many ghosts")
+            else:
+                result["topological_matrix"] = topological_matrix
         return result
 
 
@@ -362,7 +365,7 @@ if __name__ == "__main__":
         print(f"[Error] Visualizer failed to open file at: '{args.input}'", file=sys.stderr)
     else:
         detector = HexagonalTopologyDetector(31, 31)
-        result = detector.register_pattern(img, overlay=True)
+        result = detector.register_pattern(img, debug_overlay=True)
         labels = result["labels"]
         pts = result["points"]
         print(f"Extraction Successful! Isolated {len(pts)} total pattern nodes.")

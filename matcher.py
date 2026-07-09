@@ -54,17 +54,17 @@ class BarycentricSignalIsolator:
 
         # using  -> W[i] + W[i - 2], so the line should be inverted for correct axis
         if ph > 1:
-            for offset in range(bits_len):
-                p0 = patch[0, offset]
-                p1 = patch[0, offset + 1]
-                p2 = patch[1, offset]
-                p3 = patch[1, offset + 1]
+            for c in range(bits_len):
+                p0 = patch[0, c]
+                p1 = patch[0, c + 1]
+                p2 = patch[1, c]
+                p3 = patch[1, c + 1]
 
                 if p0 == -1 or p1 == -1 or p2 == -1 or p3 == -1:
                     pass
                 else:
-                    isolated_bits[offset] = int(p0 ^ p1 ^ p2 ^ p3)
-                    valid_mask[offset] = 1
+                    isolated_bits[c] = int(p0 ^ p1 ^ p2 ^ p3)
+                    valid_mask[c] = 1
 
         return isolated_bits, valid_mask
 
@@ -102,17 +102,92 @@ class BarycentricSignalIsolator:
         return isolated_bits, vert_mask
 
 
+def analyze_error_convergence_with_masks(u_errors: list, u_gaps: list, w_errors: list, w_gaps: list) -> tuple:
+    """
+    Analyzes error convergence for either a single bit flip or multiple
+    isolated single bit flips distributed across a long sequence.
+
+    Handles data dropouts (gaps) and runs completely independent of patch size.
+
+    Returns:
+        tuple: (converges, list_of_error_coords)
+            - converges: bool (True if ALL observed errors are fully explained by single bit flips)
+            - list_of_error_coords: list of (r, c) tuples for all identified faulty pixels
+    """
+    u_remaining = set(u_errors)
+    w_remaining = set(w_errors)
+
+    # Base Case: No errors detected at all means the sequence is perfectly consistent
+    if len(u_remaining) == 0 and len(w_remaining) == 0:
+        return True, []
+
+    u_gap_set = set(u_gaps)
+    w_gap_set = set(w_gaps)
+
+    # Collect all unique error indices from both streams to extract possible column candidates
+    all_observed_indices = u_remaining.union(w_remaining)
+
+    # A single bit flip at column C can only generate errors at indices: {C-2, C-1, C}
+    # Thus, any valid candidate column C must be within {idx, idx+1, idx+2} of ANY observed error
+    candidate_columns = set()
+    for idx in all_observed_indices:
+        candidate_columns.update([idx, idx + 1, idx + 2])
+
+    detected_faults = []
+
+    # Sort candidates to process the sequence linearly from left to right
+    for candidate_c in sorted(list(candidate_columns)):
+        # 1. Generate theoretical pattern if the flip happened in Row 1
+        # Targets: W={c-1, c}, U={c-1, c}
+        exp_w_r1 = {candidate_c - 1, candidate_c}
+        exp_u_r1 = {candidate_c - 1, candidate_c}
+
+        # Apply gaps and boundaries
+        exp_w_r1 = {idx for idx in exp_w_r1 if idx >= 0 and idx not in w_gap_set}
+        exp_u_r1 = {idx for idx in exp_u_r1 if idx >= 0 and idx not in u_gap_set}
+
+        # If Row 1 pattern matches a subset of remaining errors (and contains active tokens)
+        if (exp_w_r1 or exp_u_r1) and exp_w_r1.issubset(w_remaining) and exp_u_r1.issubset(u_remaining):
+            detected_faults.append((1, candidate_c))
+            w_remaining.difference_update(exp_w_r1)
+            u_remaining.difference_update(exp_u_r1)
+            continue  # Move to the next candidate column
+
+        # 2. Generate theoretical pattern if the flip happened in Row 0
+        # Targets: W={c-1, c}, U={c-2, c-1}
+        exp_w_r0 = {candidate_c - 1, candidate_c}
+        exp_u_r0 = {candidate_c - 2, candidate_c - 1}
+
+        exp_w_r0 = {idx for idx in exp_w_r0 if idx >= 0 and idx not in w_gap_set}
+        exp_u_r0 = {idx for idx in exp_u_r0 if idx >= 0 and idx not in u_gap_set}
+
+        # If Row 0 pattern matches a subset of remaining errors (and contains active tokens)
+        if (exp_w_r0 or exp_u_r0) and exp_w_r0.issubset(w_remaining) and exp_u_r0.issubset(u_remaining):
+            detected_faults.append((0, candidate_c))
+            w_remaining.difference_update(exp_w_r0)
+            u_remaining.difference_update(exp_u_r0)
+
+    # Convergence is valid ONLY if every single observed error was successfully
+    # matched and consumed by the identified single bit flip templates
+    if len(u_remaining) == 0 and len(w_remaining) == 0:
+        return True, detected_faults
+
+    # Unexplained residual errors exist (e.g., overlapping burst errors or multi-bit noise)
+    return False, []
+
+
 class AlgebraicGridDecoder32:
     """
     retrieve barycentric coordinates
     """
-    def __init__(self, grid_width, grid_height):
+    def __init__(self, grid_width, grid_height, debug_output:bool = True):
         """Initializes the main grid environment and registers all 6 directional decoders."""
         self.r = 5  # Base polynomial degree
         self.lfsr_period = (1 << self.r) - 1
         self.N = self.lfsr_period  # Grid size / Period
         self.W = grid_width
         self.H = grid_height
+        self.debug_output = debug_output
         assert self.W <= self.N and self.H <= self.N
 
         # Mapping all 6 forward and reciprocal direction polynomials
@@ -130,7 +205,7 @@ class AlgebraicGridDecoder32:
         self.streams["U"] = self.streams["U_forward"]
         self.streams["V"] = self.streams["V_forward"]
         self.streams["W"] = self.streams["W_forward"]
-        self.debug_output = False
+
         if self.debug_output:
             for axis_name in ("U", "V", "W"):
                 print(axis_name, self.streams[axis_name])
@@ -139,7 +214,6 @@ class AlgebraicGridDecoder32:
 
     def build_barycentric_matrix(self, axis_u: str = "U", axis_v: str = "V", axis_w: str = "W") -> np.ndarray:
         """Generates a 2D XOR pattern plate layout mapped to specific axis assignments."""
-        """ romboid representation """
         row_grid, col_grid = np.mgrid[:self.H, :self.W]
 
         v_grid = row_grid
@@ -189,17 +263,15 @@ class AlgebraicGridDecoder32:
         # axis must be fully reversible
         phase_h = status_horiz["origin_stream_phase"]
         if horiz_dir == "reverse":
-            phase_h = (-phase_h)
+            phase_h = -phase_h
         phase_v = status_vert["origin_stream_phase"]
         if vert_dir == "reverse":
-            phase_v = (-phase_v)
+            phase_v = -phase_v
 
         # 5. Determine the absolute horizontal U index based on the parsed axis identity
         if horiz_axis == "U":
-            # Direct track: The horizontal phase belongs directly to the U axis
             u = phase_h - offset_h
         elif horiz_axis == "W":
-            # Alternative track: Evaluates the W axis (or any reverse trajectory token)
             w = phase_h - offset_h
         elif horiz_axis == "V":
             v = phase_h - offset_h
@@ -225,17 +297,17 @@ class AlgebraicGridDecoder32:
         elif v is None:
             v = - u - w
 
-        # Since offsets are 0, any negative value is caused strictly by time inversions.
-        # We shift the components forward by whole periods to fit the physical viewport.
+        u %= self.lfsr_period
+        v %= self.lfsr_period
 
-        H_global, W_global = self.H, self.W
-
-        # Resolve any remaining period phase
-        abs_row, abs_col = normalize_barycentric(u, v, self.lfsr_period)
+        abs_row = v
+        abs_col = u + (v // 2)
+        if abs_col >= self.lfsr_period:
+            abs_col -= self.lfsr_period
 
         # Rigid safety assertion gates
         assert abs_row >= 0 and abs_col >= 0
-        assert abs_row < H_global and abs_col < W_global
+        assert abs_row <  self.H and abs_col <  self.W
 
         # 7. Pack the results strictly into your targeted payload dictionary structure
         return {
@@ -302,37 +374,15 @@ class AlgebraicGridDecoder32:
     def get_lfsr_phases(self, r: int, c: int) -> tuple:
         """Computes the exact operational LFSR phase triplet (u, v, w) for any
         sub-patch starting at global matrix coordinates (r, c).
-
-        Fully synchronized with the rhomboid matrix layout and isolator masks.
         """
-        v_grid = r
-        u_grid = c - (r // 2)
+        v = r
+        u = c - (r // 2)
 
-        u_phase = u_grid % self.lfsr_period
-        v_phase = v_grid % self.lfsr_period
-        w_phase = (-v_grid - u_grid ) % self.lfsr_period
+        u_phase = u % self.lfsr_period
+        v_phase = v % self.lfsr_period
+        w_phase = (-v - u) % self.lfsr_period
 
         return u_phase, v_phase, w_phase
-
-    def build_barycentric_matrix_zigzag(self, axis_u: str = "U", axis_v: str = "V", axis_w: str = "W") -> np.ndarray:
-        """ cyclic zigzag (r % 2).
-        """
-        row_grid, col_grid = np.mgrid[:self.H, :self.W]
-
-        v_grid = row_grid
-        # odd rows are shifted
-        u_grid = col_grid + (row_grid % 2)
-        w_grid = -v_grid - u_grid
-
-        idx_u = u_grid % self.lfsr_period
-        idx_v = v_grid % self.lfsr_period
-        idx_w = w_grid % self.lfsr_period
-
-        val_u = np.array(self.streams[axis_u])[idx_u]
-        val_v = np.array(self.streams[axis_v])[idx_v]
-        val_w = np.array(self.streams[axis_w])[idx_w]
-
-        return val_u ^ val_v ^ val_w
 
     @staticmethod
     def check_error_consistency(res_h, res_v):
@@ -342,13 +392,12 @@ class AlgebraicGridDecoder32:
         :param res_v:
         :return:
         """
-        for err_idx in res_h["errors_corrected"]:
-            if not (err_idx + 1 in res_v["errors_corrected"]) and not (err_idx + 1 in res_v["missing_gaps"]):
-                return False
-        for err_idx in res_v["errors_corrected"]:
-            if not (err_idx - 1 in res_h["errors_corrected"]) and not (err_idx - 1 in res_h["missing_gaps"]):
-                return False
-        return True
+
+        consistent, _ = analyze_error_convergence_with_masks(
+            res_h["errors_corrected"], res_h["missing_gaps"],
+            res_v["errors_corrected"], res_v["missing_gaps"])
+        return consistent
+
 
     def decode_barycentric_subgraph(self, patch: np.ndarray):
         """Tests the patch rows against all 6 directional polynomials to find the absolute position.
@@ -356,6 +405,7 @@ class AlgebraicGridDecoder32:
         Bypasses memory rotations. Leverages the external BarycentricSignalIsolator to extract
         clean horizontal and vertical bit vectors. Resolves complete coordinate indexing.
         """
+        MIN_VALID_BITS_NUM = 9
         assert isinstance(patch, np.ndarray), "Patch must be a NumPy array"
 
         best_result = {"status": "error",
@@ -368,54 +418,138 @@ class AlgebraicGridDecoder32:
         for direction_key, decoder in self.decoders.items():
             res_h = decoder.analyze(isolated_bits_h, valid_mask_h)
             if res_h:
-                # 3. Call the updated vertical axis isolator from your syndrome module
+                # 3. vertical axis isolator
                 isolated_bits_v, valid_mask_v = BarycentricSignalIsolator.isolate_w_rev_axis(patch)
-
                 # Determine which polynomial corresponds to the vertical projection lane
                 vert_key = AlgebraicGridDecoder32.get_alternative_axis(direction_key)
                 res_v = self.decoders[vert_key].analyze(isolated_bits_v, valid_mask_v)
-
                 # Match the vertical profile against the companion decoder
                 if res_v:
                     res_h["direction_key"] = direction_key
                     res_v["direction_key"] = vert_key
-                    print("Hor: ", res_h)
-                    print("Vert: ", res_v)
+                    if self.debug_output:
+                        print("Hor: ", res_h)
+                        print("Vert: ", res_v)
                     if self.check_error_consistency(res_h, res_v):
+                        if np.count_nonzero(valid_mask_v) < MIN_VALID_BITS_NUM and\
+                                np.count_nonzero(valid_mask_h) < MIN_VALID_BITS_NUM:
+                            # the sequence may be not unique (this question should be considered separately)
+                            continue
                         # Translate lattice spaces back to absolute flat matrix positions
                         result = self.resolve_cell_index(res_h, res_v)
+                        if self.debug_output:
+                            print(result)
                         if result["status"] == "success" and result['errors_corrected'] < best_result['errors_corrected']:
                             best_result = result
-                            if best_result['errors_corrected'] == 0:
-                                break
                     else:
                         print("Error consistency check failed")
 
         return best_result
 
 
-def localize_grid(island, width, height):
-    retriever = AlgebraicGridDecoder32(width, height)
+def find_max_dense_phrase_slice(sequence, min_density=0.75):
+    # Step 1: Compress sequence into block info tuples: (length, start, end, is_word)
+    if sequence is None or len(sequence) == 0:
+        return 0,0
+
+    lens_info = []
+    is_word = (sequence[0] != -1)
+    count = 1
+    start_pos = 0
+
+    for idx in range(1, len(sequence)):
+        item_is_word = (sequence[idx] != -1)
+        if item_is_word == is_word:
+            count += 1
+        else:
+            lens_info.append((count, start_pos, idx, is_word))
+            count = 1
+            start_pos = idx
+            is_word = item_is_word
+    lens_info.append((count, start_pos, len(sequence), is_word))
+
+    # Step 2: Calculate prefix scores element-by-element for precise evaluation
+    n = len(sequence)
+    pref = [0.0] * (n + 1)
+    w_mult = 1.0 - min_density
+    s_mult = -min_density
+
+    for i in range(n):
+        weight = w_mult if sequence[i] != -1 else s_mult
+        pref[i + 1] = pref[i] + weight
+
+
+    # Step 3: Find the longest valid span starting and ending on real words
+    best_start, best_end = 0, 0
+    max_len = 0
+
+    # Filter out only blocks that represent real words (is_word == True)
+    word_blocks = [b for b in lens_info if b[3]]
+
+    for start_block in word_blocks:
+        # start_block[1] is the physical start_pos of the word block
+        i = start_block[1]
+
+        for end_block in word_blocks:
+            # end_block[2] is the physical end_pos of the word block
+            j = end_block[2]
+
+            if j <= i:
+                continue
+
+            # Check if density requirement is met over this span
+            if (pref[j] - pref[i]) >= -1e-6:
+                current_len = j - i
+                if current_len > max_len:
+                    max_len = current_len
+                    best_start = i
+                    best_end = j
+
+    return best_start, best_end
+
+
+def localize_grid(island, width, height, debug_output: bool):
+    retriever = AlgebraicGridDecoder32(width, height, debug_output)
     h, w = island.shape
     result = None
     MIN_UNIQUE_SEQUENCE_LEN = 11
-    MIN_LEN = MIN_UNIQUE_SEQUENCE_LEN + 2 # + 2 for integration ( 5 + checksum)
-    for r in range(0, h, 2):
+    MIN_LEN = MIN_UNIQUE_SEQUENCE_LEN + 1 # + 1 for differentiation, also error check requires 5 + 2 * err_count
+    for r in range(0, h, 1):
+        start = w
         for c in range(0, w, 1):
             if island[r, c] >= 0:
+                start = c
                 break
-        for e in range(w - 1, 0, -1):
+
+        finish = start + 1
+        for e in range(w - 1, start, -1):
             if island[r, e] >= 0:
+                finish = e + 1
                 break
-        print(r, c, e - c + 1)
-        L = e - c + 1
+        L = finish - start
+        valid = np.count_nonzero(np.where(island[r, start:finish] != -1))
+        if valid < MIN_LEN:
+            continue
+        valid = np.count_nonzero(np.where(island[r + 1, start:finish] != -1))
+        if valid < MIN_LEN:
+            continue
+
+        if r % 2 == 0:
+            start = (start & (0xfffff - 1))
+        else:
+            if start & 1 == 0:
+                start = 1 if start == 0 else start - 1
+        L = finish - start
+        if debug_output:
+            print(f"row: {r}, col {start}, length: {L}")
         if L < MIN_LEN:
             continue
-        adjusted_c = (c & (0xfffff - 1)) if r % 2 == 0 else (c | 1)
-        sub_island = island[r:r+2, adjusted_c:e+1]
+        sub_island = island[r:r+2, start:finish]
         result = retriever.decode_barycentric_subgraph(sub_island)
         if result["status"] == "success":
-            result["source_row"], result["source_col"] = r, adjusted_c
+            if debug_output:
+                print(sub_island)
+            result["source_row"], result["source_col"] = r, start
             break
     return result
 
@@ -751,7 +885,7 @@ def test_matcher(decoder):
     # Flipping the element at index 3 (0 becomes 1, or 1 becomes 0)
     camera_detected_sequence[0,2] ^= 1
     print(f"Noisy sequence extracted by camera:  {camera_detected_sequence}")
-    print(" (Simulation parameters: Bit errors = 1)\n")
+    print(" (Simulation parameters: Bit errors = 1, flip in (0,2)\n")
     print("Matching Observed Curve to Blueprint")
     # Execute lookup permitting 1 faulty node classification
     result = decoder.decode_barycentric_subgraph(camera_detected_sequence)
@@ -773,7 +907,7 @@ def test_matcher(decoder):
     print(" -> [Verification Passed]: Row index correctly identified despite noise and gaps.")
 
 
-def test_rotated_axis_matching():
+def test_rotated_axis_matching(decoder):
     """
     Runs a comprehensive integration test sweep across all 6 hexagonal
     rotational orientations. Verifies that the adaptive rotation matrices
@@ -783,8 +917,6 @@ def test_rotated_axis_matching():
     print("Launching Integrated Rotational Phase Synchronization Pass...")
     print("=======================================================")
 
-    # Initialize your core 32-bit algebraic decoder engine
-    decoder = AlgebraicGridDecoder32()
     lfsr_period = decoder.lfsr_period
 
     # 1. Setup a known absolute starting cell coordinate near the matrix center
@@ -796,7 +928,7 @@ def test_rotated_axis_matching():
     blueprint = decoder.build_barycentric_matrix()
     np.set_printoptions(threshold=np.inf, linewidth=200)
     # 3. Sweep continuously through all 6 rotational angles (0 to 300 degrees)
-    directions =["U_forward", "W_reverse", "V_reverse", "U_reverse", "W_forward", "V_forward"]
+    directions =["U_forward", "W_reverse", "V_forward", "U_reverse", "W_forward", "V_reverse"]
 
     for k, direction in enumerate(directions):
         print(f"\n--- Evaluating Rotational Quadrant State: k = {k} ({k * 60} deg CCW) ---")
@@ -806,7 +938,7 @@ def test_rotated_axis_matching():
         print(rotated_sheet)
 
         # 5. Invoke your joint multi-axis intersection subgraph decoder
-        res = localize_grid(rotated_sheet)
+        res = localize_grid(rotated_sheet, decoder.W, decoder.H, True)
         # --- CRITICAL INTEGRATION EXTRACTION CHECKS ---
         # Assert that a valid mathematical state consensus was successfully achieved
         assert res is not None, f"Tracking Loop Failed: Decoder dropped lock at k = {k}"
@@ -820,8 +952,8 @@ def test_rotated_axis_matching():
         assert "row" in res and "col" in res, "Telemetry Error: Missing absolute position fields"
 
         # Validate that the coordinate loop successfully collapses back to a valid location
-#        assert 0 <= res["row"] < lfsr_period, f"Boundary Error: Invalid wrapped row index {res['row']}"
-#        assert 0 <= res["col"] < lfsr_period, f"Boundary Error: Invalid wrapped col index {res['col']}"
+        assert 0 <= res["row"] < lfsr_period, f"Boundary Error: Invalid wrapped row index {res['row']}"
+        assert 0 <= res["col"] < lfsr_period, f"Boundary Error: Invalid wrapped col index {res['col']}"
 
         print(f" -> State Integration Pass k = {directions[k]}: SUCCESS (Lock verified on axis {res.get('horizontal_axis')})")
 
@@ -847,7 +979,7 @@ def test_multi_angle_rotational_sweep(decoder):
     blueprint = decoder.build_barycentric_matrix()
 
     # Define observation patch dimensions matching your 1D sliding windows
-    patch_h, patch_w = 6, 15
+    patch_h, patch_w = 6, 17
     np.set_printoptions(threshold=np.inf, linewidth=200)
     # 2. Iterate through all 6 rotational orientations (0 to 300 degrees CCW)
     for k in range(0,6):
@@ -909,7 +1041,7 @@ def test_multi_angle_rotational_sweep(decoder):
                     print(f"    Patch Local:    Row {target_r}, Col {target_c}")
                     print(f"    Absolute Rot:   Row {r_rotated_abs}, Col {c_rotated_abs}")
                     print(f"    Expected Match: Row {expected_r}, Col {expected_c}")
-                    print(f"    Decoder Output: Row {res['row']}, Col {res['col']}")
+                    print(f"    Decoder Output: Row {res['row']}, Col {res['col']} b {res['b']}")
                     print(f"    Expected: u {u}, v {v}")
                     print(f"    Details: {err}")
                     raise err
@@ -921,7 +1053,52 @@ def test_multi_angle_rotational_sweep(decoder):
     print("=======================================================")
 
 
+def test_find_max_dense_phrase_slice():
+    print("Running verification test suite...")
+
+    # Case 1: All segments pass density requirements and merge fully
+    case_1 = [1, 0, 1, 0, -1, 1, 1, -1, 1, 0]
+    res_1 = find_max_dense_phrase_slice(case_1, min_density=0.75)
+    assert res_1 == (0,10), f"Failed Case 1, got {res_1}"
+
+    # Case 2: Catastrophic gap structure breaks sequential tracking loop
+    case_2 = [1, 0, 1, 0, -1, 1, 1, -1, -1, -1, -1, 1, 1, 0]
+    res_2 = find_max_dense_phrase_slice(case_2, min_density=0.75)
+    assert res_2 == (0,7), f"Failed Case 2, got {res_2}"
+
+    # Case 3: Hard constraint fail: sep_len (2) >= next_word_len (2)
+    case_3 = [1, 1, 1, 1, -1, -1, 0, 0]
+    #
+    res_3 = find_max_dense_phrase_slice(case_3, min_density=0.75)
+    assert res_3 == (0,8), f"Failed Case 3, got {res_3}"
+
+    res_3 = find_max_dense_phrase_slice(case_3, min_density=0.76)
+    assert res_3 == (0, 4), f"Failed Case 3, got {res_3}"
+
+    # Case 4: Gradual structural density dilution cutoff threshold
+    case_4 = [1, 0, -1, 1, 1, -1, 0, 0, -1, 1, 1]
+    res_4 = find_max_dense_phrase_slice(case_4, min_density=0.75)
+    assert res_4 == (0,8), f"Failed Case 4, got {res_4}"
+
+    # Case 5: Single continuous isolated word block initialization
+    case_5 = [1, 0, 1]
+    res_5 = find_max_dense_phrase_slice(case_5, min_density=0.70)
+    assert res_5 == (0,3), f"Failed Case 5, got {res_5}"
+
+    # Case 6: Pure empty input bounds guard clause check
+    case_6 = []
+    res_6 = find_max_dense_phrase_slice(case_6, min_density=0.70)
+    assert res_6 == (0,0), f"Failed Case 6, got {res_6}"
+
+    case_7 = [0, 1, 0, -1, -1, -1, 0, -1, -1, 0, 0, 0, 0]
+    res_7 = find_max_dense_phrase_slice(case_7, min_density=0.8)
+    assert res_7 == (9,13), f"Failed Case 7, got {res_7}"
+    print("Success: All test assertions passed flawlessly!")
+
+
+
 if __name__ == "__main__":
+    test_find_max_dense_phrase_slice()
     decoder = AlgebraicGridDecoder32(grid_width=31, grid_height=31)
     test_full_matrix(decoder)
     test_isolator(decoder)
@@ -929,5 +1106,5 @@ if __name__ == "__main__":
     test_simplified_axis_matching(decoder)
     test_matcher(decoder)
     test_exhaustive_grid_sweep(decoder)
-    test_multi_angle_rotational_sweep(decoder)
     test_rotated_axis_matching(decoder)
+    test_multi_angle_rotational_sweep(decoder)

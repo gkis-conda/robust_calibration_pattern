@@ -36,13 +36,14 @@ def evaluate_topology(gt_dict, detected_dict):
     A detection is rejected as a Ghost/Misalignment if it drifts 
     beyond 1/3 of the local pixel lattice spacing due to intense motion.
     """
-    tp = 0   # True Positives: Correct ID matched within 1/3 lattice step
-    ma = 0   # Misalignments: Wrong ID matched, or correct ID drifted > 1/3 step
-    fp = 0   # Ghosts: Artifacts registered out in unmapped territory
+    tp = 0       # True Positives: Correct ID matched within 1/3 lattice step
+    ma = 0       # Misalignments: correct ID drifted > 1/3 step
+    fp = 0       # Wrong ID inside 1/3 lattice step
+    ghosts = 0   # Ghosts: Artifacts registered out of unmapped territory
     
     total_gt = len(gt_dict)
     if total_gt == 0:
-        return 0, 0, 0, 0.0, 0.0, 0
+        return {"tp": tp , "ma": ma, "fp": fp, "ghosts": ghosts}
 
     # Extract ground truth structures for fast spatial mapping
     gt_keys = list(gt_dict.keys())
@@ -57,31 +58,161 @@ def evaluate_topology(gt_dict, detected_dict):
         # 2. Dynamically calculate the local pixel step size
         # We query the nearest 2 neighbors to find the local lattice step in pixels
         # at this specific perspective compression area of the image.
-        step_distances, _ = gt_tree.query(gt_coords[idx], k=2)
-        local_pixel_step = step_distances[1] # Distance to the actual closest neighbor node
-        
-        # 3. Apply the 1/3 Lattice Step Hard Constraint Boundary
-        max_allowed_drift_px = local_pixel_step / 3.0
-        
-        if dist > max_allowed_drift_px:
-            # The point has drifted into no-man's land or crossed the neighbor threshold
-            fp += 1 
-            continue
-            
-        # 4. Fact of Classification Audit inside the valid 1/3 neighborhood
+        step_distances, _ = gt_tree.query(gt_coords[idx], k=3)
+        max_allowed_drift_px = (step_distances[1] + step_distances[2]) / 6. # Distance to the actual closest neighbor node
+
         if det_id == nearest_gt_key:
             avg_dist += dist
-            tp += 1  # Successfully identified and localized within safety bounds
+            if dist > max_allowed_drift_px:
+                # The point has drifted into no-man's land or crossed the neighbor threshold
+                ma += 1
+            else:
+                tp += 1  # Successfully identified and localized within safety bounds
         else:
-            ma += 1  # ID tracking mismatch inside the valid cell area
+            # 4. Fact of Classification Audit inside the valid 1/3 neighborhood
+            if dist > max_allowed_drift_px:
+                ghosts += 1  # Successfully identified and localized within safety bounds
+            else:
+                fp += 1  # ID tracking mismatch inside the valid cell area
 
-    # Strict performance metrics formulation
-    precision_denom = tp + ma + fp
-    precision = float(tp) / precision_denom if precision_denom > 0 else 0.0
-    recall = float(tp) / total_gt if total_gt > 0 else 0.0
     if tp > 0:
         avg_dist /= tp
-    return tp, ma, fp, precision, recall, avg_dist
+    return {"tp": tp , "ma": ma, "fp": fp, "ghosts": ghosts, "avg_dist" : avg_dist}
+
+
+import numpy as np
+from scipy.spatial import cKDTree
+
+
+def classify_topology_nodes(gt_dict, detected_dict):
+    """
+    Analyzes and classifies each detected point based on geometric proximity constraints.
+    Returns a dictionary mapping det_id to its point classification details.
+    """
+    total_gt = len(gt_dict)
+    if total_gt == 0 or len(detected_dict) == 0:
+        return {}
+
+    gt_keys = list(gt_dict.keys())
+    gt_coords = np.array([gt_dict[k][1:3] for k in gt_keys])
+    gt_tree = cKDTree(gt_coords)
+
+    classifications = {}
+
+    for det_id, det_coord in detected_dict.items():
+        coords_2d = det_coord[1:3]
+
+        # 1. Spatial alignment query
+        dist, idx = gt_tree.query(coords_2d, k=1)
+        nearest_gt_key = gt_keys[idx]
+
+        # 2. Dynamic neighborhood gate calculation
+        step_distances, _ = gt_tree.query(gt_coords[idx], k=3)
+        max_allowed_drift_px = (step_distances[1] + step_distances[2]) / 6.0
+
+        # 3. Structural assignment taxonomy
+        if det_id == nearest_gt_key:
+            if dist > max_allowed_drift_px:
+                pt_type = "ma"  # Correct ID drifted too far
+            else:
+                pt_type = "tp"  # Perfect tracking hit
+        else:
+            if dist > max_allowed_drift_px:
+                pt_type = "ghosts"  # Arbitrary noise out in empty space
+            else:
+                pt_type = "fp"  # Identity mismatch inside cell bounds
+
+        classifications[det_id] = {
+            "type": pt_type,
+            "dist": float(dist),
+            "coords": coords_2d,
+            "nearest_gt": nearest_gt_key
+        }
+
+    return classifications
+
+
+def compute_topology_statistics(gt_dict, classifications):
+    """
+    Aggregates point classifications to output a standardized performance metrics matrix.
+    """
+    stats = {"tp": 0, "ma": 0, "fp": 0, "ghosts": 0, "avg_dist": 0.0}
+
+    total_gt = len(gt_dict)
+    if total_gt == 0:
+        return stats
+
+    total_dist = 0.0
+    for node_info in classifications.values():
+        pt_type = node_info["type"]
+        stats[pt_type] += 1
+
+        if pt_type == "tp":
+            total_dist += node_info["dist"]
+
+    # Calculate average distance safely
+    if stats["tp"] > 0:
+        stats["avg_dist"] = total_dist / stats["tp"]
+
+    # Derive high-level analytics scores
+    total_detections = len(classifications)
+    stats["precision"] = float(stats["tp"]) / total_detections if total_detections > 0 else 0.0
+    stats["recall"] = float(stats["tp"]) / total_gt if total_gt > 0 else 0.0
+    stats["total_gt"] = total_gt
+
+    return stats
+
+
+import cv2
+
+def draw_topology_scene(gt_dict, classifications, bg_image=None):
+    """
+    Renders the ground truth and classified nodes onto a canvas using OpenCV.
+    Draws circles with high-contrast distinct colors.
+
+    Parameters:
+        gt_dict (dict): Ground truth node dictionary.
+        classifications (dict): Output from classify_topology_nodes.
+        canvas_size (tuple): (Height, Width) of the fallback canvas if bg_image is None.
+        bg_image (np.ndarray): Optional input image (e.g. your camera frame) to draw on.
+
+    Returns:
+        canvas (np.ndarray): BGR image matrix with rendered circles.
+    """
+    # 1. Initialize canvas (use your image frame if provided, otherwise clean black background)
+    canvas = bg_image.copy()
+
+    # 2. Setup OpenCV BGR Color Palette Chart
+    # Color format in OpenCV is strictly (Blue, Green, Red)
+    color_map = {
+        "gt": (120, 120, 120),  # Gray
+        "tp": (0, 255, 0),  # Bright Green
+        "ma": (0, 165, 255),  # Orange
+        "fp": (255, 0, 255),  # Magenta
+        "ghosts": (0, 0, 255)  # Pure Red
+    }
+
+    # 3. Draw ground truth nodes as smaller hollow gray circles in the background
+    if gt_dict:
+        for v in gt_dict.values():
+            # OpenCV requires integer coordinates for pixel plotting
+            cx, cy = int(round(v[1])), int(round(v[2]))
+            # cv2.circle(img, center, radius, color, thickness)
+            cv2.circle(canvas, (cx, cy), radius=4, color=color_map["gt"], thickness=1)
+
+    # 4. Overlay classified detection nodes as solid filled circles
+    for node_info in classifications.values():
+        pt_type = node_info["type"]
+        x, y = node_info["coords"]
+        cx, cy = int(round(x)), int(round(y))
+
+        # Pick color matching the calculated tracking taxonomy
+        color = color_map.get(pt_type, (255, 255, 255))
+
+        # Draw solid circle (thickness=-1 fills the circle completely)
+        cv2.circle(canvas, (cx, cy), radius=7, color=color, thickness=-1)
+
+    return canvas
 
 
 # ==============================================================================
@@ -104,19 +235,13 @@ if __name__ == "__main__":
     files = os.listdir(DATASET_DIR)
     case_images = [f for f in files if f.endswith(".png")]
     case_images.sort()
-    
-    # Markdown Output Document Definition Block
-    md_rows = [
-        "| Test Case Name | GT Nodes | True Positives (TP) | Misalignments (MA) | Ghosts (FP) | Precision | Recall | Avg Dist |",
-        "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |"
-    ]
-    
+
     print("Launching Topological Integrity Audit...")
     
     with open(os.path.join(DATASET_DIR, "summary.md"), 'w', encoding='ascii') as f:
         f.write("\n### TOPOLOGICAL MATCHING PERFORMANCE RESULT\n\n")
-        f.write("| Test Case Name | GT Nodes | True Positives (TP) | Misalignments (MA) | Ghosts (FP) | Precision | Recall | Avg Dist (pixels) |\n")
-        f.write("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |\n")
+        f.write("| Test Case Name | GT Nodes | Detected | True Positives (TP) | Misalignments (MA) | FP | Ghosts | Precision | Recall | Avg Dist (pixels) |\n")
+        f.write("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |\n")
         for img_name in case_images:
             case_id = img_name[:-4]
             img_path = os.path.join(DATASET_DIR, img_name)
@@ -127,6 +252,7 @@ if __name__ == "__main__":
             print(f"Processing test case {case_id}...")
 
             image = cv2.imread(img_path)
+            stat_image = image.copy()
             gt_map = parse_ground_truth(gt_path)
 
             # Run your tracking classification algorithm
@@ -147,9 +273,21 @@ if __name__ == "__main__":
                             detected_map[(r,c)] = (labels[point_idx], x, y)
 
             # Audit topology verification maps
-            tp, ma, fp, prec, rec, avg_dist = evaluate_topology(gt_map, detected_map)
-
-            f.write(f"| {case_id} | {len(gt_map)} | {tp} | {ma} | {fp} | {prec:.3f} | {rec:.3f} | {avg_dist:.1f} |\n")
+            #stats = evaluate_topology(gt_map, detected_map)
+            classifications = classify_topology_nodes(gt_map, detected_map)
+            output_image = draw_topology_scene(gt_map, classifications, stat_image)
+            cv2.imwrite(os.path.join(DATASET_DIR, img_name + "-stat.png"), output_image)
+            metrics = compute_topology_statistics(gt_map, classifications)
+            # Strict performance metrics formulation
+            tp = metrics["tp"]
+            ma = metrics["ma"]
+            fp = metrics["fp"]
+            ghosts = metrics["ghosts"]
+            total = tp + ma + fp + ghosts
+            precision = tp / total if total > 0 else 0.0
+            recall = tp / len(gt_map) if len(gt_map) > 0 else 0.0
+            dist = metrics['avg_dist']
+            f.write(f"| {case_id} | {len(gt_map)} | {total} | {tp} | {ma} | {fp} | {ghosts} | {precision:.3f} | {recall:.3f} | {dist:.1f} |\n")
         f.write("\n")
 
 
