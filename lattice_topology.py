@@ -2,119 +2,26 @@ import numpy as np
 # =========================================================================
 # CORE TOPOLOGICAL TRANSFORMATION MODULE
 # =========================================================================
-def normalize_barycentric(u_linear: int, v_linear: int, lfsr_period: int = 31) -> tuple:
-    """
-    Normalizes continuous linear barycentric coordinates (u, v) into the canonical
-    discrete matrix coordinate viewport (row, col) inside the 31x31 target field.
-
-    Enforces a strict two-sided algebraic residue wrapper to prevent bottom-left
-    corner clipping and index compression under extreme rotation shifts.
-    """
-    v_canonical = int(v_linear) % lfsr_period
-    u_canonical = int(u_linear) % lfsr_period
-
-    combined_envelope = u_canonical + (v_canonical // 2)
-
-    if combined_envelope >= lfsr_period:
-        # Resolve rightward and bottom-right overflow leaks
-        u_canonical -= lfsr_period
-
-    # 3. Reconstruct definitive absolute matrix indices safely
-    r_matrix = v_canonical
-    c_matrix = u_canonical + (v_canonical // 2)
-    assert c_matrix >= 0
-
-    return r_matrix, c_matrix
 
 
 def get_phase_from_coordinates(r: int, c: int, lfsr_period: int = 31) -> tuple:
     """
     FORWARD PATH: Translates positive discrete matrix row and column indices (r, c)
     directly into pure, unwarped linear algebraic phase parameters (u, v).
-
-    Fully wrapped inside the positive residue class pool.
     """
     v_phase = r % lfsr_period
     # Since c and r are positive, unwarping via floor division is completely stable
-    u_phase = (c - (v_phase // 2)) % lfsr_period
+    u_phase = (c - (v_phase//2)) % lfsr_period
     return u_phase, v_phase
 
 
 def get_coordinates_from_phase(pu: int, pv: int, lfsr_period: int = 31) -> tuple:
-
-    # Rule 1: Row coordinate v is aprioristically positive because v = r and r >= 0.
+    # Rules: Row coordinate v is always positive because v = r and r >= 0.
     # If a rotation or window tracking offset drops v below zero, we apply
     # a positive modulo period shift to pull it back into the visible semi-space.
-    assert pv>=0 and pu >=0
-    r = pv
-    s = r//2
-    c = pu + s
-
-    # If the candidate column leaks past the physical matrix boundaries,
-    # it confirms that u belongs in the negative coordinate space (r > c condition)
-    c = c%lfsr_period
-
+    r = pv % lfsr_period
+    c = (pu + r//2) % lfsr_period
     return r, c
-
-
-def add_rhomboid_coordinates(coord: tuple, delta: tuple) -> tuple:
-    """
-    Performs precise coordinate translation over a staggered rhomboid/hexagonal grid.
-    Accepts and returns unified (r, c) tuples to eliminate tracking drift.
-
-    Args:
-        coord (tuple): Original source coordinate pair (r, c).
-        delta (tuple): Translation offset step pair (dr, dc).
-
-    Returns:
-        tuple: (global_r, global_c) raw absolute destination coordinates.
-    """
-    r, c = coord
-    v = r
-    u = c - r // 2
-
-    dr, dc = delta
-    dv = dr
-    du = dc - dr // 2
-
-    v += dv
-    u += du
-
-    # Row tracking maps forward linearly
-    global_r = v
-    global_c = u + (v // 2)
-
-    return global_r, global_c
-
-
-def sub_rhomboid_coordinates(coord: tuple, delta: tuple) -> tuple:
-    """
-    Performs precise coordinate translation over a staggered rhomboid/hexagonal grid.
-    Accepts and returns unified (r, c) tuples to eliminate tracking drift.
-
-    Args:
-        coord (tuple): Original source coordinate pair (r, c).
-        delta (tuple): Translation offset step pair (dr, dc).
-
-    Returns:
-        tuple: (global_r, global_c) raw absolute destination coordinates.
-    """
-    r, c = coord
-    v = r
-    u = c - r // 2
-
-    dr, dc = delta
-    dv = dr
-    du = dc - dr // 2
-
-    v -= dv
-    u -= du
-
-    # Row tracking maps forward linearly
-    global_r = v
-    global_c = u + (v // 2)
-
-    return global_r, global_c
 
 
 def convert_grid_to_matrix(point_grid):
@@ -125,7 +32,6 @@ def convert_grid_to_matrix(point_grid):
     Dynamically injects an empty padding row at index 0 if the initial
     minimum V coordinate bound has an odd parity to maintain alignment phase.
 
-    Compatible with Python 3.2 and old NumPy versions.
     """
     if not point_grid:
         return np.array([[]], dtype=np.int32)
@@ -183,9 +89,7 @@ def convert_matrix_to_grid(dense_matrix, min_u_anchor=0, min_v_anchor=0):
     """
     Reconstructs the sparse topological {point_id: (u, v)} dictionary
     from a dense layout matrix based on row-parity neighborhood steps.
-
     Ignores -1 padding elements (representing empty space).
-    Fully optimized and compatible with Python 3.2.
     """
     point_grid = {}
     if dense_matrix is None or dense_matrix.size == 0:
@@ -256,21 +160,19 @@ def get_rotation_steps_from_axis(horizontal_axis: str, direction: str) -> int:
     return 0
 
 
-def rotate_barycentric(r: int, c: int, k: int) -> tuple:
+def rotate_barycentric_phase(u: int, v: int, k: int) -> tuple:
     """
     Performs a strict 60-degree parameterized rotation of a single discrete
     grid cell index over a hexagonal matrix layout using the algebraic domain.
 
     Fully synchronized with your Cartesian physical projection verification table.
-    Fully ASCII-compliant implementation.
     """
     steps = k % 6
     if steps == 0:
-        return r, c
+        return u, v
 
-    v_curr = r
-    s = r // 2
-    u_curr = c - s
+    v_curr = v
+    u_curr = u
     w_curr = -v_curr - u_curr
 
     for _ in range(steps):
@@ -282,9 +184,27 @@ def rotate_barycentric(r: int, c: int, k: int) -> tuple:
         v_curr = v_next
         w_curr = w_next
 
-    r_rotated = v_curr
-    s = r_rotated // 2
-    c_rotated = u_curr + s
+    return u_curr, v_curr
+
+
+def rotate_barycentric(r: int, c: int, k: int) -> tuple:
+    """
+    Performs a strict 60-degree parameterized rotation of a single discrete
+    grid cell index over a hexagonal matrix layout using the algebraic domain.
+
+    Fully synchronized with your Cartesian physical projection verification table.
+    return:
+        linear r,c It is not normalized coordinates by modulo, be highly careful in usage
+    """
+    steps = k % 6
+    if steps == 0:
+        return r, c
+
+    v_curr = r
+    u_curr = c - r // 2
+    u_rotated, v_rotated = rotate_barycentric_phase(u_curr, v_curr, k)
+    r_rotated = v_rotated
+    c_rotated = u_rotated + r_rotated // 2
 
     return r_rotated, c_rotated
 
@@ -294,8 +214,6 @@ def rotate_barycentric_matrix_adaptive(original_matrix: np.ndarray, k: int) -> t
     Rotates a barycentric matrix by (k * 60) degrees CCW with adaptive canvas resizing.
     Evaluates bounding box limits strictly within the discrete (r, c) storage matrix space,
     but performs the local window translations inside the linear topological domain.
-
-    Fully ASCII-compliant implementation.
     """
     H_orig, W_orig = original_matrix.shape
     steps = k % 6
@@ -304,8 +222,8 @@ def rotate_barycentric_matrix_adaptive(original_matrix: np.ndarray, k: int) -> t
     if steps == 0:
         return np.copy(original_matrix), (0, 0)
 
-    transformed_rows = []
-    transformed_cols = []
+    transformed_rows = set()
+    transformed_cols = set()
 
     # Step 1: Pre-calculate the bounding box boundaries strictly within the discrete (r, c) space
     for r in range(H_orig):
@@ -316,8 +234,8 @@ def rotate_barycentric_matrix_adaptive(original_matrix: np.ndarray, k: int) -> t
             # Invoke the modular scalar rotation helper
             r_dest, c_dest = rotate_barycentric(r, c, steps)
 
-            transformed_rows.append(r_dest)
-            transformed_cols.append(c_dest)
+            transformed_rows.add(r_dest)
+            transformed_cols.add(c_dest)
 
     # Protection Guard: If the patch contains no valid points, return a blank sheet
     if not transformed_rows:
@@ -414,7 +332,7 @@ def topological_reflection(coord_b, coord_c):
     # Symmetrical shift formula under your custom cross-product layout
     r_u, r_v = CYCLE_VECTORS[(idx - 1) % 6]
 
-    return (b_u + r_u, b_v + r_v)
+    return b_u + r_u, b_v + r_v
 
 
 def apply_single_rotation(u, v, rot_idx):
@@ -482,7 +400,7 @@ def find_discrete_transform(p_src_A, p_src_B, p_dst_A, p_dst_B):
 
 class IslandDSU:
     """
-    ASCII-compliant Disjoint Set Union (DSU) tracker for grid islands.
+    Disjoint Set Union (DSU) tracker for grid islands.
     Manages point cluster indices and tracks structural sizes for optimization.
     """
     def __init__(self, num_points):
@@ -546,7 +464,7 @@ class IslandDSU:
                 self.sizes[idx] = 1
 
 # =========================================================================
-# ISOLATED UNIT TESTS SECTION
+# UNIT TESTS SECTION
 # =========================================================================
 def test_dsu_basic_operations():
     """
@@ -913,6 +831,7 @@ def test_matrix_rotation(H, W):
     print(min_r, min_c)
     for r in range(matrix_rotated.shape[0]):
         print(f"Local Row {r}: {matrix_rotated[r, :]}")
+
 
 def test_hexagonal_phase_bijection_pure():
     """Sweeps the complete 31x31 space using raw inline assert constraints."""

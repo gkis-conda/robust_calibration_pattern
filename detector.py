@@ -1,15 +1,11 @@
-import cv2
 import numpy as np
-import argparse
-import sys
 from crystal import reconstruct_mesh
-from matcher import localize_grid
+from matcher import AlgebraicGridDecoder32
 from lattice_topology import *
 from generate import generate_triangular_gray_grid
 from optimization import *
-from camera import ProjectiveCamera
-from pathlib import Path
-
+import camera_io
+import cv2
 
 def map_matrix_indices(matrix, labels):
     labels_map = matrix.copy()
@@ -22,7 +18,7 @@ def map_matrix_indices(matrix, labels):
     return labels_map
 
 
-def detect_and_classify_grid_nodes(img, min_area=15, max_area=5000, epsilon_coeff=0.04, edge_margin_px=2):
+def detect_and_classify_grid_nodes(img, min_area=15, max_area=5000, edge_margin_px=2):
     """
     Detects target dots from a real-world photo. Utilizes a continuous metric 
     distance classifier and filters out partial/cut shapes touching the image 
@@ -51,7 +47,7 @@ def detect_and_classify_grid_nodes(img, min_area=15, max_area=5000, epsilon_coef
     
     points_list = []
     labels_list = []
-    
+    size_list = []
     # Ideal calibration references
     ideal_tri_circularity = 0.605
     ideal_circle_circularity = 1.000
@@ -105,11 +101,9 @@ def detect_and_classify_grid_nodes(img, min_area=15, max_area=5000, epsilon_coef
         
         points_list.append([cx, cy])
         labels_list.append(shape_label)
-                
-    if len(points_list) == 0:
-        return np.array([], dtype=np.float64), np.array([], dtype=np.int32)
-        
-    return np.array(points_list, dtype=np.float64), np.array(labels_list, dtype=np.int32)
+        size_list.append(perimeter/np.pi)
+
+    return np.array(points_list, dtype=np.float64), np.array(labels_list, dtype=np.int32), np.array(size_list, np.float64)
 
 
 def visualize_detections(img, points, labels):
@@ -118,11 +112,8 @@ def visualize_detections(img, points, labels):
     font_scale = 0.3  # Font size multiplier
     color = (0, 0, 0)
     thickness = 1  # Line thickness in pixels
-
-    # 3. Add text to the image
-
     idx = 0
-    radius = 7
+    radius = 7 # feature size both for circles and rects, rects should be changed to triangles
     for pt, label in zip(points, labels):
         ix, iy = int(np.round(pt[0])), int(np.round(pt[1])) # Fixed spatial indexing typo
         if label == 0:
@@ -203,33 +194,26 @@ def map_island_indices_to_blueprint(
 
     # 4. Un-tilt the patch and extract the exact bounding box minimum shifts (min_r, min_c)
     flat_patch, (min_r, min_c) = rotate_barycentric_matrix_adaptive(island_patch, -k_steps)
+    # switch to barycentric
+    v_min = min_r
+    u_min = min_c - (v_min // 2)
 
     # Map the absolute registered source cell coordinates into the un-tilted framework
     source_row_rot, source_col_rot = rotate_barycentric(source_row_orig, source_col_orig, -k_steps)
     v_src_abs = source_row_rot
     u_src_abs = source_col_rot - (v_src_abs // 2)
 
-    # Unwarp your discrete (r, c) bounding box corner into linear axes
-    v_min = min_r
-    u_min = min_c - (v_min // 2)
-
     # Perform the window translation subtraction inside the linear topological domain
     v_local = v_src_abs - v_min
     u_local = u_src_abs - u_min
 
-    # Reconstruct local relative target coordinates to preserve the logging trace
-    source_row = int(v_local)
-    source_col = int(u_local + (source_row // 2))
-
-    print("Source coords:", source_row, source_col)
     print("Target coords:", target_row, target_col)
 
     h, w = flat_patch.shape
-
     # Pre-unwarp global target anchors into the pure linear barycentric domain
     v_tgt_linear = target_row
     u_tgt_linear = target_col - (v_tgt_linear // 2)
-    v_offset =  v_tgt_linear - v_local
+    v_offset = v_tgt_linear - v_local
     u_offset = u_tgt_linear - u_local
 
     # 5. Single-pass mapping loop to merge data on the shared global matrix canvas
@@ -241,7 +225,6 @@ def map_island_indices_to_blueprint(
             if point_idx == -1:
                 continue
 
-            # --- PURE BARYCENTRIC TRANSLATION (NO COGNITIVE OVERHEAD) ---
             # 1. Unwarp the current local patch coordinate into linear barycentric parameters
             v_pt_linear = r
             u_pt_linear = c - (v_pt_linear // 2)
@@ -252,16 +235,16 @@ def map_island_indices_to_blueprint(
 
             # 3. Apply the absolute boundary normalization check directly on the linear coordinates
             # right before writing to the canvas matrix sheet
-            global_r, global_c = normalize_barycentric(u_global_linear, v_global_linear, 31)
+            global_r, global_c = get_coordinates_from_phase(u_global_linear, v_global_linear, 31)
 
             # Update elements in-place on the shared master tracking canvas
             if (0 <= global_r < H_global) and (0 <= global_c < W_global):
                 topological_matrix[global_r, global_c] = point_idx
 
 
-def verify_and_cleanse_topological_matrix(topological_matrix: np.ndarray,
-                                          blueprint_matrix: np.ndarray,
-                                          labels: list) -> int:
+def verify_topological_matrix(topological_matrix: np.ndarray,
+                              blueprint_matrix: np.ndarray,
+                              labels: list) -> int:
     """
     Cross-checks the populated topological tracking matrix against the master
     blueprint matrix using real physical label bit assignments.
@@ -280,31 +263,38 @@ def verify_and_cleanse_topological_matrix(topological_matrix: np.ndarray,
     """
     H_global, W_global = topological_matrix.shape
     wiped_count = 0
-
+    label_status = labels.copy()
     # Walk cell-by-cell over the entire physical coordinate sheet viewport
+    correct = set()
+
     for r in range(H_global):
         for c in range(W_global):
             point_idx = topological_matrix[r, c]
-
-            # Skip empty background locations or unpopulated tracking slots
+            # Skip unpopulated tracking slots
             if point_idx == -1:
                 continue
-
-            if labels[point_idx] != blueprint_matrix[r,c]:
-                # If an out-of-bounds or corrupt label key slips through, wipe it instantly
-                topological_matrix[r, c] = -1
+            if labels[point_idx] == blueprint_matrix[r,c]:
+                correct.add(point_idx)
+            else:
                 wiped_count += 1
+                label_status[point_idx] = HexagonalTopologyDetector.MISCLASSIFIED
 
-    return wiped_count
-
+    mask = (label_status != HexagonalTopologyDetector.MISCLASSIFIED)
+    mask[list(correct)] = False
+    label_status[mask] = HexagonalTopologyDetector.GHOST
+    return wiped_count, label_status
 
 
 class HexagonalTopologyDetector:
+    MISCLASSIFIED = -1
+    GHOST = -2
+    ENGINE_FULL_NAME = "Hexagonal Galois Pattern Matching Engine"
     """
+     Image decoder, performs full image matching processing pipeline
     """
     def __init__(self, grid_rows, grid_cols):
-        # OpenCV grid patterns expect dimensions passed as (columns, rows)
         self.grid_size = (grid_cols, grid_rows)
+        self.decoder = AlgebraicGridDecoder32(grid_cols, grid_rows, True)
 
     def register_pattern(self, img, debug_overlay: True):
         """
@@ -312,9 +302,10 @@ class HexagonalTopologyDetector:
             dict: {(row, col): [x_px, y_px]} containing indexed sub-pixel centers.
         """
         result = {}
-        pts, labels = detect_and_classify_grid_nodes(img)
+        pts, labels, sizes = detect_and_classify_grid_nodes(img)
         result["points"] = pts
         result["labels"] = labels
+        result["sizes"] = sizes
         width, height = self.grid_size
         topological_matrix = np.full((height, width), -1, dtype=np.int32)
         if len(pts) == 0:
@@ -328,54 +319,75 @@ class HexagonalTopologyDetector:
             if debug_overlay:
                 visualize_reconstructed_grid(img, island, pts)
             island_label_map = map_matrix_indices(island, labels)
-            match_result = localize_grid(island_label_map, width, height, True)
-            if match_result is not None:
-                matches.append(match_result)
-                map_island_indices_to_blueprint(island, match_result, topological_matrix)
+            for k in range(6):
+                rotated_map, _ = rotate_barycentric_matrix_adaptive(island_label_map, k)
+                match_result = self.decoder.localize_grid(rotated_map)
+                if match_result["status"] == "success":
+                    matches.append(match_result)
+                    island, _ = rotate_barycentric_matrix_adaptive(island, k)
+                    map_island_indices_to_blueprint(island, match_result, topological_matrix)
+                    break
 
         if len(matches) > 0:
-            wiped_ghosts = verify_and_cleanse_topological_matrix(
-                topological_matrix, generate_triangular_gray_grid(width, height), labels)
+            blueprint = generate_triangular_gray_grid(width, height)
+            wiped_ghosts, label_status = verify_topological_matrix(
+                topological_matrix, blueprint, labels)
             result["matches"] = matches
+            result["label_status"] = label_status
             if wiped_ghosts > len(labels) / 2:
-                print("Too many ghosts")
+                result["status"] = "error"
+                result["message"] = "Too many ghosts"
             else:
+                result["status"] = "success"
                 result["topological_matrix"] = topological_matrix
+        else:
+            result["status"] = "error"
+            result["message"] = "Detected graph cannot be decoded"
+
         return result
 
 
 # =====================================================================
 # SYSTEM TERMINAL INTERFACE
 # =====================================================================
-
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Grid Extraction Parser.")
-    parser.add_argument("-i", "--input", type=str, required=True, help="Input calibration frame image path.")
-    parser.add_argument("-o", "--output", type=str, default="", help="Output file path.")
-    parser.add_argument("-C", "--calibrate", action='store_true', help="Perform focal distance and k1 calibration")
-    args = parser.parse_args()
-    if args.output == "":
-        output = Path(args.input).stem + "_result.png"
-    else:
-        output = args.output
+    import sys
+    import argparse
+    from pathlib import Path
+    import glob
+    import os
 
-    img = cv2.imread(args.input)
-    if img is None:
-        print(f"[Error] Visualizer failed to open file at: '{args.input}'", file=sys.stderr)
-    else:
+
+    def process_image(file_name, debug_overlay = False):
+        img = cv2.imread(file_name)
+        if img is None:
+            print(f"[Error] Visualizer failed to open file at: '{file_name}'", file=sys.stderr)
+            return None
+
         detector = HexagonalTopologyDetector(31, 31)
-        result = detector.register_pattern(img, debug_overlay=True)
+        result = detector.register_pattern(img, debug_overlay=debug_overlay)
+        if result['status'] != 'success':
+            print(f"[Error] Pattern registration failed for: '{file_name}'", file=sys.stderr)
+            return None  # Changed exit(0) to return None to prevent full directory loop aborts!
+
         labels = result["labels"]
-        pts = result["points"]
-        print(f"Extraction Successful! Isolated {len(pts)} total pattern nodes.")
-        print(f" -> Circles identified: {np.sum(labels == 0)}")
-        print(f" -> Triangles identified: {np.sum(labels == 1)}")
-        success = cv2.imwrite(output, img)
-        if success:
-            print(f"Visualization overlay image with marked nodes saved successfully to '{output}'")
+        print(f"Extraction Successful! Isolated {len(labels)} total pattern nodes from {Path(file_name).name}.")
+        circles_num = np.sum(labels == 0)
+        triangles_num = np.sum(labels == 1)
+        total = circles_num + triangles_num
+        if total > 0:
+            print(f" -> Identified Circles: {circles_num} ({circles_num * 100/total:.2f}%)"
+                  f" Triangles {triangles_num} ({triangles_num * 100/total:.2f}%)")
         else:
-            print(f"Failed to write visualizer image to: '{output}'", file=sys.stderr)
+            print(f" -> No shapes detected")
+        if debug_overlay:
+            output = Path(file_name).stem + "-debug.png"
+            success = cv2.imwrite(output, img)
+            if success:
+                print(f"Visualization overlay image with marked nodes saved successfully to '{output}'")
+            else:
+                print(f"Failed to write visualizer image to: '{output}'", file=sys.stderr)
+
         if "topological_matrix" in result:
             topological_matrix = result["topological_matrix"]
             np.set_printoptions(threshold=np.inf, linewidth=200)
@@ -383,8 +395,84 @@ if __name__ == "__main__":
             print(topological_matrix)
             mapped_labels = map_matrix_indices(topological_matrix, labels)
             print(mapped_labels)
-            H, W = img.shape[:2]
-            if args.calibrate:
-               cam = ProjectiveCamera((W, H), fx_px=(W+H)/4,  fy_px=(W+H)/4, cx=W/2, cy=H/2, k1=-0.1)
-               result = calibrate_single_frame_zhang_menger(topological_matrix, pts, cam)
-               print(result)
+            return result
+        return None
+
+
+    # Command line interface entry parameters
+    parser = argparse.ArgumentParser(description="Grid Extraction Parser.")
+    parser.add_argument("-i", "--input", type=str, required=True, help="Input image file path OR dataset directory.")
+    parser.add_argument("-o", "--output", type=str, default="", help="Output file path.")
+    parser.add_argument("-C", "--calibrate", action='store_true', help="Perform focal distance and k1 calibration")
+    parser.add_argument("--save-images", action="store_true", help="Save debug images")
+
+    args = parser.parse_args()
+
+    # Populate file-list for processing
+    input_path = args.input
+    valid_extensions = (".png", ".jpg", ".jpeg", ".bmp", ".tiff")
+    target_image_files = []
+
+    if os.path.isdir(input_path):
+        print(f" -> Input path identified as DIRECTORY: {input_path}")
+        for file_name in glob.glob(os.path.join(input_path,'*')):
+            # check popular processing filename suffix
+            if file_name.lower().endswith(valid_extensions) and\
+                    not Path(file_name).stem.endswith(("-debug", "-stat", "_result", "-diagnostic")):
+                target_image_files.append(file_name)
+        target_image_files.sort()  # Alphabetical sorting for deterministic tracking history
+        print(f" -> Collected {len(target_image_files)} calibration graphics.")
+    elif os.path.isfile(input_path):
+        if input_path.lower().endswith(valid_extensions):
+            target_image_files.append(input_path)
+        else:
+            print(f"[Error] Standalone file extension format selection is not supported: '{input_path}'",
+                  file=sys.stderr)
+            sys.exit(1)
+    else:
+        print(f"[Error] Target path destination does not exist on disk: '{input_path}'", file=sys.stderr)
+        sys.exit(1)
+
+    if len(target_image_files) == 0:
+        print("[Error] Image queue is empty. Stop", file=sys.stderr)
+        sys.exit(1)
+
+    if args.calibrate:
+        # Load standard config context template from your module profiles based on the first item profile
+        baseline_cam = camera_io.find_camera_config(target_image_files[0], load=True)
+        if baseline_cam is None:
+            img = cv2.imread(target_image_files[0])
+            h, w = img.shape[:2]
+        else:
+            w, h = baseline_cam.img_shape
+        initial_cam = ProjectiveCamera((w, h), fx_px=w/2, fy_px=w/2, cx=w/2, cy=h/2, k1=-0.1)
+        # Instantiate your new stateful multi-view accumulator container instance
+        calibrator = MultiFrameCalibrator(camera_object=initial_cam, N=12, MIN_LEN=15)
+
+        for file_path in target_image_files:
+            print(f"\n--- Processing: {os.path.basename(file_path)} ---")
+            frame_extraction_result = process_image(file_path, args.save_images)
+
+            if frame_extraction_result is not None:
+                calibrator.add_frame(
+                    topological_matrix=frame_extraction_result["topological_matrix"],
+                    detected_points=frame_extraction_result["points"],
+                    point_weights=1./np.array(frame_extraction_result["sizes"])
+                )
+
+        # Trigger your smart polymorphic calibration routine (natively splits 1-view vs multi-view matrix models!)
+        final_calibration_dict = calibrator.calibrate()
+        print("\n--- FINAL CALIBRATION SUMMARY ---")
+        print(final_calibration_dict)
+        if final_calibration_dict["status"] == "success":
+            result_cam = camera_io.deserialize_camera_from_dict(final_calibration_dict)
+            if baseline_cam is not None:
+                print("\n--- GROUND TRUTH INTRINSICS ---")
+                print(camera_io.serialize_camera_to_dict(baseline_cam))
+                camera_io.save_camera_comparison_md(input_path, result_cam, baseline_cam)
+    else:
+        # If calibration flags remain unchecked, execute pure standalone low-level topological mapping loops
+        print(" -> Calibration flags deactivated (-C absent). Executing structural grid logging tracks only.")
+        for file_path in target_image_files:
+            print(f"\n--- Processing: {os.path.basename(file_path)} ---")
+            process_image(file_path)
