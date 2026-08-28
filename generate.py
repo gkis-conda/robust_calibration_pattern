@@ -65,8 +65,9 @@ class PhysicalMeshGenerator:
         self.r_tri = self.r_circ * np.sqrt(np.pi / (3.0 * np.sqrt(3.0) / 4.0))
 
         # Center calibration offsets: Center the grid coordinate space relative to (0,0) world coordinates
-        self.center_x_offset = (1.0 - float(self.grid_matrix.shape[1])) / 2.0
-        self.center_y_offset = (1.0 - float(self.grid_matrix.shape[0])) / 2.0
+        h,w = self.grid_matrix.shape
+        self.center_x_offset = (1.0 - 2 * w) / 4
+        self.center_y_offset = np.sqrt(3.0) * (1.0 - h) / 4
 
     def __iter__(self):
         """
@@ -92,12 +93,8 @@ class PhysicalMeshGenerator:
         Returns:
             list       : [x_phys, y_phys] absolute hexagonal screen positions in mm.
         """
-        # RESTORED: Pure hexagonal physical lattice generation.
-        # Inside the storage matrix, rows and columns are packed flat.
-        # But in physical space, every odd row is shifted horizontally by exactly 0.5 * step_mm,
-        # and vertical row spacing is compressed by sqrt(3)/2 to maintain equilateral triangulation.
-        x_phys = ((float(c) + 0.5 * float(r % 2)) + self.center_x_offset) * self.step_mm
-        y_phys = (float(r) * np.sqrt(3.0) / 2.0 + self.center_y_offset) * self.step_mm
+        x_phys = (c + 0.5 * float(r % 2) + self.center_x_offset) * self.step_mm
+        y_phys = (r * np.sqrt(3.0) / 2.0 + self.center_y_offset) * self.step_mm
         return [x_phys, y_phys]
 
     def get_shape_contour(self, r: int, c: int) -> list:

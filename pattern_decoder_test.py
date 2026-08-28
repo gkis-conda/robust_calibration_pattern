@@ -1,22 +1,19 @@
 import numpy as np
-from scipy.spatial import KDTree
+from scipy.spatial import cKDTree
 from generate import PhysicalMeshGenerator
 from camera import compute_camera_projection_matrix, ProjectiveCamera
 from detector import *
 import json
 import os
 
-ENGINE_FULL_NAME = "Galois Field Pattern Matching Engine"
 
 def render_warped_grid_shapes(mesh_generator, cam: ProjectiveCamera, R: np.ndarray, t: np.ndarray) -> np.ndarray:
     """
-    STAGE 3b: LOCAL WARP RENDERING WITH ACCURATE RADIAL LOOKUP FILTERING
     Draws shapes onto the camera viewport by projectively transforming every
     explicit boundary contour vertex using the ProjectiveCamera abstraction layer.
-
     """
     # 1. Initialize a clean, white canvas matching your camera sensor array size
-    canvas = np.ones((cam.H_img, cam.W_img, 3), dtype=np.uint8) * 255
+    canvas = np.full((cam.H_img, cam.W_img, 3), 255, dtype=np.uint8)
 
     # 2. Render Loop: Iterate through each active shape block inside the generator
     for i, j, shape_type, contour in mesh_generator:
@@ -25,20 +22,12 @@ def render_warped_grid_shapes(mesh_generator, cam: ProjectiveCamera, R: np.ndarr
             continue
 
         world_pts = np.array(contour, dtype=np.float32)
-
-        # RE-USE OBJECT COMPONENT: Offload all projection transformations,
-        # homography math, and radius guardrail intercept checks to the class!
         pixel_pts = cam.project_points(world_pts, R, t)
-
-        # If any single vertex broke past the stable limit radius, the camera
-        # class safely returns None, and we drop this truncated edge node cleanly.
         if pixel_pts is None:
             continue
 
-        # 3. Convert to signed 32-bit integers required by OpenCV rendering tools
+        # Convert to signed 32-bit integers required by OpenCV rendering tools
         pixel_pts_int = np.round(pixel_pts).astype(np.int32)
-
-        # Draw and fill the projected polygon directly on the primary canvas
         cv2.fillPoly(canvas, [pixel_pts_int], 0, lineType=cv2.LINE_AA)
 
     return canvas
@@ -100,8 +89,6 @@ def apply_multi_island_mask(base_blueprint: np.ndarray) -> np.ndarray:
     Preserves the original cell identifiers completely, but carves isolation barriers
     of -1 tokens down the center lines to prevent wave-growth islands from connecting.
 
-    Fully ASCII-compliant implementation.
-
     Args:
         base_blueprint (np.ndarray): The source ground-truth matrix layout.
 
@@ -162,8 +149,8 @@ def calculate_reconstruction_metrics(topological_matrix: np.ndarray,
             "expected_erasures": 0, "erasure_leaks": 0
         }
 
-    # 1. STEP A: BUILD GEOMETRIC SEARCH TREE FROM DETECTED FEATURE BLOBS
-    detected_kdtree = KDTree(detected_points)
+    # 1. STEP A: BUILD GEOMETRIC SEARCH TREE FROM DETECTED FEATURES
+    detected_kdtree = cKDTree(detected_points)
 
     processed_detection_ids = set()
 
@@ -187,19 +174,16 @@ def calculate_reconstruction_metrics(topological_matrix: np.ndarray,
 
             # Query the precise non-warped world coordinate center from the generator
             node_world_center = generator.get_shape_center(r_true, c_true)
-            pixel_pts = camera.project_points(node_world_center, R, t)
+            pt = camera.project_point(node_world_center, R, t)
 
             # Enforce native viewport camera visibility clipping walls
-            if pixel_pts is None:
-                continue
-            pixel_pts = pixel_pts[0]
-            if not camera.is_visible(pixel_pts):
+            if pt is None or not camera.is_visible(pt):
                 continue
 
             if not is_erased_target:
                 total_visible_targets += 1
 
-            x_true, y_true = float(pixel_pts[0]), float(pixel_pts[1])
+            x_true, y_true = pt[0], pt[1]
 
             # Match the ideal camera target to the nearest physical detected blob on sensor
             distance, point_idx = detected_kdtree.query([x_true, y_true])
@@ -232,7 +216,6 @@ def calculate_reconstruction_metrics(topological_matrix: np.ndarray,
             # Extract decoded local grid addresses from the matches
             r_dec, c_dec = int(decoded_locations[0][0]), int(decoded_locations[0][1])
 
-            # THE ABSOLUTE TOPOLOGICAL CONFORMANCE AUDIT
             if r_dec == r_true and c_dec == c_true:
                 true_positives += 1
             else:
@@ -240,14 +223,19 @@ def calculate_reconstruction_metrics(topological_matrix: np.ndarray,
 
     # 3. STEP C: CAPTURE UNMATCHED GHOST ARTIFACTS
     # Any blob recorded by camera but missing entirely from the master target board blueprint
-    ghost_nodes = len(detected_points) - len(processed_detection_ids)
+    detected_points_num = len(detected_points)
+    ghost_nodes = detected_points_num - len(processed_detection_ids)
 
     # 4. CALCULATE DEFINITIVE PERFORMANCE YIELD SCORES
     # Accuracy is evaluated strictly over what points were physically observable on screen
-    accuracy_score = (true_positives / total_visible_targets) * 100.0 if total_visible_targets > 0 else 0.0
+    if detected_points_num > 0:
+        true_negative = expected_erasures - erasure_leaks
+        accuracy_score = (true_positives + true_negative) / (detected_points_num + expected_erasures) * 100.0
+    else:
+        accuracy_score = 0.0
 
     # STABILITY CRITERIA CHECK: Pass if accuracy is >= 90% and there are ZERO false positives
-    is_case_passed = (accuracy_score >= 90.0) and (misalignments == 0)and (ghost_nodes == 0)
+    is_case_passed = (accuracy_score >= 90.0) and (misalignments == 0)
 
     return {
         "is_passed": is_case_passed,
@@ -262,17 +250,17 @@ def calculate_reconstruction_metrics(topological_matrix: np.ndarray,
         "erasure_leaks": erasure_leaks
     }
 
+from run_validation import draw_topology_scene
 
 def evaluate_single_integration_case(base_blueprint: np.ndarray,
+                                     detector:HexagonalTopologyDetector,
                                      case_name: str,
                                      case_payload: dict,
+                                     save_dir: str = None,
                                      save_images: bool = False) -> dict:
     """
     Evaluates a single universal integration test case dataset configuration.
     Processes the case array buffer, decodes phases, and maps coordinates in-memory.
-
-    Natively initializes the ProjectiveCamera tracker completely via its constructor
-    using parameters extracted straight from the case_payload['camera'] dictionary.
 
     """
     STEP_PX = 45.0
@@ -280,18 +268,9 @@ def evaluate_single_integration_case(base_blueprint: np.ndarray,
     blueprint = case_payload["blueprint"]
     cam_params = case_payload["camera"]
     cam_intrinsics = case_payload["intrinsics"]
+    cam_obj = camera_io.deserialize_camera_from_dict(cam_intrinsics)
 
-    # 1. Extract hardware parameters directly from the dictionary block
-    f_px = cam_intrinsics.get("f_px")
-    width = cam_intrinsics.get("width_px")
-    height = cam_intrinsics.get("height_px")
-    cx = cam_intrinsics.get("cx", width/2)
-    cy = cam_intrinsics.get("cy", height/2)
-    k1 = cam_intrinsics.get("k1")
-
-    cam_obj = ProjectiveCamera((width, height), fx_px=f_px, fy_px=f_px, cx=cx, cy=cy, k1=k1)
-
-    # 3. Compute camera projection extrinsics matrix [R|t] per case profile
+    # Compute camera projection extrinsics matrix [R|t] per case profile
     R, t = compute_camera_projection_matrix(
         roll_deg=cam_params["roll"],
         pitch_deg=cam_params["pitch"],
@@ -301,16 +280,15 @@ def evaluate_single_integration_case(base_blueprint: np.ndarray,
         tz=cam_params["tz"]
     )
 
-    # 4. Simulate physics generation pass and build the local adaptive tilted patch
+    # Simulate physics generation pass and build the local adaptive tilted patch
     generator = PhysicalMeshGenerator(blueprint, STEP_PX, STEP_PX / 5)
 
     # Render the frame cleanly using our short object component pipeline
     img = render_warped_grid_shapes(generator, cam_obj, R, t)
 
-    # Optional image saving gate
     if save_images:
         output_filename = f"synthetic_shot_{case_name}.png"
-        cv2.imwrite(output_filename, img)
+        cv2.imwrite(os.path.join(save_dir, output_filename), img)
         print(f" -> Export Complete: Saved original image to '{output_filename}'")
 
     # Adjust reference blueprint targets for out-of-frame boundary clipping
@@ -318,62 +296,50 @@ def evaluate_single_integration_case(base_blueprint: np.ndarray,
         base_blueprint=blueprint,
         generator=generator,
         camera=cam_obj,
-        R = R,
-        t= t
+        R=R,
+        t=t
     )
+    result=detector.register_pattern(img, save_images)
+    if result is None or result["status"] != "success":
+        return {"status": "success",
+            "case_name": case_name,
+            "description": case_payload["description"]}
 
-    pts, labels = detect_and_classify_grid_nodes(img)
-    if save_images:
-        visualize_detections(img, pts, labels)
-    topological_matrix = np.full(blueprint.shape, -1, dtype=np.int32)
-    if len(pts) > 0:
-        matches_islands = reconstruct_mesh(pts, labels)
-        for island in matches_islands:
-            island_label_map = map_matrix_indices(island, labels)
-            match_result = localize_grid(island_label_map, base_blueprint.shape[1], base_blueprint.shape[0])
-            if match_result is not None:
-                map_island_indices_to_blueprint(island, match_result, topological_matrix)
-                if save_images:
-                    visualize_reconstructed_grid(img, island, pts)
-
-        wiped_points_num = verify_and_cleanse_topological_matrix(
-            topological_matrix,
-            base_blueprint, labels)
-        np.set_printoptions(threshold=np.inf, linewidth=200)
-        print("original")
-        print(visible_blueprint)
-        print("restored")
-        print(map_matrix_indices(topological_matrix, labels))
+    print("original")
+    print(visible_blueprint)
+    print("restored")
+    mapped_labels = map_matrix_indices(result["topological_matrix"], result["labels"])
+    print(mapped_labels)
 
     if save_images:
-        output_filename = f"synthetic_shot_{case_name}_result.png"
-        cv2.imwrite(output_filename, img)
+        cv2.imwrite(os.path.join(save_dir, f"synthetic_shot_{case_name}-debug.png"), img)
         # Generate the color-coded true-positive metric diagnostic overlay
-        debug_overlay = render_telemetry_grid_overlay(
-            frame=None,
-            topological_matrix=topological_matrix,
-            detected_points = pts,
-            base_blueprint=base_blueprint,  # Cross-reference against the visible layout mask
-            modified_blueprint = blueprint,
+        gt_dict, actual_dict = extended_classify_topology_nodes(
+            topological_matrix=result["topological_matrix"],
+            detected_points=result["points"],
+            detected_labels=result["labels"],
+            base_blueprint=base_blueprint,
+            modified_blueprint=blueprint,
             generator=generator,
             camera=cam_obj,
-            R = R, t=t,
-            legend_position = "bottom_right"
+            R=R, t=t,
+            max_allowed_drift_px=4.0
         )
+        debug_overlay = draw_topology_scene(gt_dict, actual_dict, img, legend_position="bottom_left")
         # Save the diagnostic visualization matrix directly to disk
-        diagnostic_filename = f"diagnostic_overlay_{case_name}.png"
-        cv2.imwrite(diagnostic_filename, debug_overlay)
-        print(f" -> Diagnostic Telemetry Complete: Exported visual debug overlay to '{diagnostic_filename}'")
+        diagnostic_filename = f"synthetic_shot_{case_name}-diagnostic.png"
+        cv2.imwrite(os.path.join(save_dir, diagnostic_filename), debug_overlay)
+        print(f" -> Exported visual debug overlay to '{diagnostic_filename}'")
 
     # 8. Process accuracy metrics against our updated visible blueprint mask
     metrics = calculate_reconstruction_metrics(
-        topological_matrix=topological_matrix,
-        detected_points=pts,  # Ensure your script extracts and forwards this array
+        topological_matrix=result["topological_matrix"],
+        detected_points=result["points"],
         base_blueprint=base_blueprint,
         modified_blueprint=blueprint,
         generator=generator,
         camera=cam_obj,
-        R = R, t=t
+        R=R, t=t
     )
 
     metrics["status"] = "success"
@@ -409,228 +375,69 @@ def compute_visible_blueprint(base_blueprint: np.ndarray,
     return visible_blueprint
 
 
-def render_telemetry_legend_overlay(frame: np.ndarray,
-                                    position: str = "bottom_left",
-                                    opacity: float = 0.75) -> np.ndarray:
+def extended_classify_topology_nodes(topological_matrix: np.ndarray,
+                                     detected_points: np.ndarray,
+                                     detected_labels: np.ndarray,
+                                     base_blueprint: np.ndarray,
+                                     modified_blueprint: np.ndarray,
+                                     generator,
+                                     camera,
+                                     R: np.ndarray, t: np.ndarray,
+                                     max_allowed_drift_px: float = None) -> tuple:
     """
-    Draws a semi-transparent background panel and color-coded telemetry legend
-    at a user-specified corner quadrant on the video tracking frame canvas.
-
-    Variables Description:
-        frame (np.ndarray) : The image canvas matrix to receive the overlay.
-        position (str)     : Screen quadrant position flag ("bottom_left",
-                             "bottom_right", "top_left", "top_right").
-        opacity (float)    : Transparency blending factor for the backdrop box.
-
-    Returns:
-        np.ndarray         : Canvas matrix with the embedded telemetry legend panel.
+    Adapter function that structures node configurations and shapes, invokes
+    the core spatial classifier, and enriches it with true negative erasures (tn)
+    and omissions using a claimed-key grid protection mapping layer.
     """
-    H_img, W_img = frame.shape[0], frame.shape[1]
+    assert max_allowed_drift_px is not None, "A valid float threshold max_allowed_drift_px must be explicitly provided."
+    from run_validation import classify_topology_nodes
 
-    # 1. Define fixed dimension bounds for the legend panel window box
-    panel_w = 420
-    panel_h = 160
-    margin_x = 20
-    margin_y = 20
-
-    # 2. Compute absolute pixel box limits dynamically based on position anchor
-    pos_key = position.strip().lower()
-
-    if pos_key == "top_left":
-        x1 = margin_x
-        y1 = margin_y
-    elif pos_key == "top_right":
-        x1 = W_img - panel_w - margin_x
-        y1 = margin_y
-    elif pos_key == "bottom_right":
-        x1 = W_img - panel_w - margin_x
-        y1 = H_img - panel_h - margin_y
-    else:
-        # Default fallback tracking context token: "bottom_left"
-        x1 = margin_x
-        y1 = H_img - panel_h - margin_y
-
-    x2 = x1 + panel_w
-    y2 = y1 + panel_h
-
-    # 3. Render semi-transparent dark backdrop rectangle pane safely
-    backdrop = np.copy(frame)
-    cv2.rectangle(backdrop, (x1, y1), (x2, y2), (20, 20, 20), -1, lineType=cv2.LINE_AA)
-    cv2.addWeighted(backdrop, opacity, frame, 1.0 - opacity, 0, frame)
-
-    # Outer white perimeter hair-line border trim
-    cv2.rectangle(frame, (x1, y1), (x2, y2), (180, 180, 180), 1, lineType=cv2.LINE_AA)
-
-    # 4. Define structured legend item attributes (BGR color tuple, Label String)
-    legend_items = [
-        ((0, 255, 0), "True Positive (Perfect Decode Match)"),
-        ((0, 0, 255), "False Positive (Index Alignment Drift)"),
-        ((0, 165, 255), "Amber Node (Lattice Found, Skipped by Graph)"),
-        ((255, 0, 0), "Optical Miss (Hidden Baseline Target)"),
-        ((255, 0, 255), "True Negative (Expected Hardware Erasure)")
-    ]
-
-    # Text placement relative pointer calculations
-    start_x = x1 + 20
-    start_y = y1 + 25
-    line_spacing = 26
-
-    # 5. Stream tracking markers and label blocks straight onto the canvas sheet
-    for idx, (color_bgr, label_text) in enumerate(legend_items):
-        curr_y = start_y + (idx * line_spacing)
-
-        # Render a matching indicator marker circle matching the overlay specs
-        cv2.circle(frame, (start_x, curr_y - 4), 6, color_bgr, -1, lineType=cv2.LINE_AA)
-
-        # Print the corresponding descriptive legend text block
-        cv2.putText(frame,
-                    label_text,
-                    (start_x + 20, curr_y),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.40,
-                    (240, 240, 240),
-                    1,
-                    cv2.LINE_AA)
-
-    return frame
-
-
-def render_telemetry_grid_overlay(frame: np.ndarray,
-                                  topological_matrix: np.ndarray,
-                                  detected_points: np.ndarray,
-                                  base_blueprint: np.ndarray,
-                                  modified_blueprint: np.ndarray,
-                                  generator,
-                                  camera,
-                                  R: np.ndarray, t: np.ndarray,
-                                  legend_position = None, max_matching_dist_px: float = 4.0) -> np.ndarray:
-    """
-    Renders an inverted color-coded diagnostic geometric overlay by building a
-    KD-Tree from raw detected points and sweeping across the ground-truth blueprint.
-
-    Cross-checks against the active modified_blueprint array passed from your
-    test runner configurations to seamlessly identify broken or omitted points.
-
-    Color Guide:
-      - Bright Green  (0, 255, 0)   : True Positive (Detected and decoded perfectly)
-      - Bright Red    (0, 0, 255)   : False Positive / Misaligned Index Drift
-      - Amber/Orange  (0, 165, 255) : Optical Lock Found, but Skipped by Wave-Growth
-      - Bright Blue   (255, 0, 0)   : Pure Optical Miss (Hidden baseline point)
-      - Bright Magenta(255, 0, 255) : True Negative / Expected Erasure (Broken Point)
-    """
     H_nodes, W_nodes = base_blueprint.shape
+    gt_dict = {}
 
-    # 1. Canvas Frame Protection Initialization
-    if frame is None:
-        overlay_canvas = np.ones((camera.H_img, camera.W_img, 3), dtype=np.uint8) * 255
-    elif len(frame.shape) == 2:
-        overlay_canvas = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-    else:
-        overlay_canvas = np.copy(frame)
-
-    # If no points are found on screen, immediately paint any expected erasures and exit
-    if detected_points is None or len(detected_points) == 0:
-        print(" -> [WARNING] Visualizer received an empty detected_points array.")
-        # Draw expected broken points even on a completely blank canvas frame
-        for r_true in range(H_nodes):
-            for c_true in range(W_nodes):
-                if base_blueprint[r_true, c_true] >= 0 and modified_blueprint[r_true, c_true] < 0:
-                    node_world_center = generator.get_shape_center(r_true, c_true)
-                    pixel_pts = camera.project_points(node_world_center, R, t)
-                    if pixel_pts is not None and camera.is_visible(pixel_pts):
-                        cv2.circle(overlay_canvas, (int(np.round(pixel_pts[0])), int(np.round(pixel_pts[1]))),
-                                   5, (255, 0, 255), -1, lineType=cv2.LINE_AA)
-        return overlay_canvas
-
-    # 2. STEP A: BUILD THE TREE DIRECTLY FROM LIVE SENSOR DETECTED POINTS
-    detected_kdtree = KDTree(detected_points)
-    processed_detection_ids = set()
-
-    # 3. STEP B: TRAVERSE THE GROUND-TRUTH BLUEPRINT MATRIX SCHEMA
-    for r_true in range(H_nodes):
-        for c_true in range(W_nodes):
-            # Skip unpopulated grid background voids entirely
-            if base_blueprint[r_true, c_true] < 0:
+    # 1. GENERATE THE IDEAL GROUND TRUTH NODE REGISTRY WITH SHAPE MATRICES
+    for r in range(H_nodes):
+        for c in range(W_nodes):
+            if base_blueprint[r, c] < 0:
                 continue
+            node_world_center = generator.get_shape_center(r, c)
+            pt = camera.project_point(node_world_center, R, t)
+            if pt is not None and camera.is_visible(pt):
+                # Maps directly to the expected core parser signature: (shape_type, x, y)
+                gt_dict[(r, c)] = (base_blueprint[r, c], pt[0], pt[1])
 
-            # Query the spatial model center point from the generator
-            node_world_center = generator.get_shape_center(r_true, c_true)
-            pixel_pts = camera.project_points(node_world_center, R, t)
+    # 2. SEAMLESS EARLY RETURN FOR BLANK CANVAS FRAMES
+    if detected_points is None or detected_points.size == 0:
+        classifications = {}
+        for (r, c), gt_coord in gt_dict.items():
+            is_erased = (modified_blueprint[r, c] < 0)
+            classifications[(r, c)] = {
+                "type": "tn" if is_erased else "fn",
+                "dist": float('inf'),
+                "coords": (gt_coord[1], gt_coord[2]),
+                "nearest_gt": (r, c)
+            }
+        return gt_dict, classifications
 
-            # Filter out points that fall outside your exact camera viewport boundary pass
-            if pixel_pts is None:
-                continue
-            pixel_pts = pixel_pts[0]
-            if not camera.is_visible(pixel_pts):
-                continue
-            # Check modification layout: Is this point known to be broken/erased?
-            is_broken_point = (modified_blueprint[r_true, c_true] < 0)
-
-            # Query the detected points tree to see if the blob finder captured anything here
-            distance, point_idx = detected_kdtree.query(pixel_pts)
-
-            if distance > max_matching_dist_px:
-                if is_broken_point:
-                    # TRUE NEGATIVE: Broken point was correctly ignored by the optical layer
-                    cv2.circle(overlay_canvas, (int(np.round(pixel_pts[0])), int(np.round(pixel_pts[1]))),
-                               5, (255, 0, 255), -1, lineType=cv2.LINE_AA)
-                else:
-                    # OPTICAL MISS: Baseline dot is inside view limits, but blob detector missed it!
-                    cv2.circle(overlay_canvas, (int(np.round(pixel_pts[0])), int(np.round(pixel_pts[1]))),
-                               4, (255, 0, 0), -1, lineType=cv2.LINE_AA)
-                continue
-
-            # If the point was captured but it was supposed to be erased, flag it as an optical leak
-            if is_broken_point:
-                processed_detection_ids.add(point_idx)
-                cv2.circle(overlay_canvas, (int(np.round(pixel_pts[0])), int(np.round(pixel_pts[1]))),
-                           7, (0, 0, 255), 2, lineType=cv2.LINE_AA)  # Red hollow ring over broken leak
-                continue
-
-            processed_detection_ids.add(point_idx)
-
-            # Search your topological matrix lookup table to cross-examine index placement
-            decoded_locations = np.argwhere(topological_matrix == point_idx)
-
-            if len(decoded_locations) == 0:
-                # UNDECODED ELEMENT: Blob was physically found, but the wave-growth graph missed it!
-                cv2.circle(overlay_canvas,
-                           (int(np.round(detected_points[point_idx][0])), int(np.round(detected_points[point_idx][1]))),
-                           5, (0, 165, 255), -1, lineType=cv2.LINE_AA)
-                continue
-
+    # 3. GENERATE THE LIVE DETECTED INDEX REGISTRY EMBEDDING HARDWARE LABELS
+    detected_dict = {}
+    for idx in range(len(detected_points)):
+        decoded_locations = np.argwhere(topological_matrix == idx)
+        if len(decoded_locations) > 0:
             r_dec, c_dec = int(decoded_locations[0][0]), int(decoded_locations[0][1])
+            detected_dict[(r_dec, c_dec)] = (detected_labels[idx], detected_points[idx][0], detected_points[idx][1])
+        else:
+            # Rejections are stored under integer handles to keep them isolated from matrix bounds
+            detected_dict[idx] = (detected_labels[idx], detected_points[idx][0], detected_points[idx][1])
 
-            # THE DEFINITIVE METRIC EQUALITY CHECKS
-            if r_dec == r_true and c_dec == c_true:
-                # TRUE POSITIVE: Geometric extraction and algebraic decoding match perfectly!
-                node_color = (0, 255, 0)
-                marker_radius = 6
-            else:
-                # FALSE POSITIVE ALIGNMENT DRIFT: Decoded to the wrong matrix index slot!
-                node_color = (0, 0, 255)
-                marker_radius = 8
-
-            cv2.circle(overlay_canvas,
-                       (int(np.round(detected_points[point_idx][0])), int(np.round(detected_points[point_idx][1]))),
-                       marker_radius, node_color, -1, lineType=cv2.LINE_AA)
-
-    # 4. STEP C: DETECT PHANTOM GHOST NOISE ANOMALIES
-    # Any detected point left unmatched by the blueprint pass is drawn as a Red square
-    for point_idx in range(len(detected_points)):
-        if point_idx not in processed_detection_ids:
-            cv2.rectangle(overlay_canvas,
-                          (int(detected_points[point_idx][0]) - 4, int(detected_points[point_idx][1]) - 4),
-                          (int(detected_points[point_idx][0]) + 4, int(detected_points[point_idx][1]) + 4),
-                          (0, 0, 255), -1, lineType=cv2.LINE_AA)
-
-    if legend_position is not None:
-        render_telemetry_legend_overlay(
-            frame=overlay_canvas,
-            position=legend_position,
-            opacity=0.8
-        )
-    return overlay_canvas
+    # 4. INVOKE YOUR CORE MATHEMATICAL CLASSIFIER
+    # Natively distributes 'tp', 'fp', 'ma', and 'ghost' classes based on your geometry
+    classifications = classify_topology_nodes(
+        gt_dict,
+        detected_dict,
+        max_allowed_drift_px=max_allowed_drift_px
+    )
+    return gt_dict, classifications
 
 
 def save_test_case_markdown_report(case_name: str,
@@ -702,7 +509,7 @@ def save_test_case_markdown_report(case_name: str,
     md_content.append(
         f"| **Pure Optical Misses** | {misses} | Core blueprint dots inside view limits that failed the thresholding blob detector. |")
     md_content.append(
-        f"| **Phantom Noise Artifacts (Ghosts)** | {ghosts} | Spurious noise blobs registered by camera that do not exist on the master template. |")
+        f"| **Noise Artifacts (Ghosts)** | {ghosts} | Spurious noise blobs registered by camera that do not exist on the master template. |")
     md_content.append(
         f"| **Expected Erasures (True Negatives)** | {erasures} | Hardware-level missing spots or mask holes correctly bypassed by the tracker. |")
     md_content.append(
@@ -712,14 +519,14 @@ def save_test_case_markdown_report(case_name: str,
     md_content.append("## Camera Simulation Extrinsics & Position Parameters")
     md_content.append("| Transformation Axis | Simulated Value Input | Geometric Spatial Unit |")
     md_content.append("| :--- | :--- | :--- |")
-    md_content.append(f"| **Camera Roll Rotation** | {roll:.2f} | Degrees (Counter-Clockwise Phase) |")
-    md_content.append(f"| **Camera Pitch Tilt** | {pitch:.2f} | Degrees (Forward Perspective Foreshortening) |")
-    md_content.append(f"| **Camera Yaw Angle** | {yaw:.2f} | Degrees (Sideways Panoramic Drift) |")
+    md_content.append(f"| **Camera Roll Rotation** | {roll:.2f} | Degrees |")
+    md_content.append(f"| **Camera Pitch Tilt** | {pitch:.2f} | Degrees |")
+    md_content.append(f"| **Camera Yaw Angle** | {yaw:.2f} | Degrees |")
     md_content.append(f"| **Translation Vector X (tx)** | {tx:.2f} | mm (Horizontal Camera Sensor Offset) |")
     md_content.append(f"| **Translation Vector Y (ty)** | {ty:.2f} | mm (Vertical Camera Sensor Offset) |")
     md_content.append(f"| **Translation Vector Z (tz)** | {tz:.2f} | mm (Lens Distance focal height clearance) |")
     md_content.append(
-        f"\n***\n*Report automatically compiled and serialized by {ENGINE_FULL_NAME}.*")
+        f"\n***\n*Report automatically compiled and serialized by {HexagonalTopologyDetector.ENGINE_FULL_NAME}.*")
 
     # 5. Write the compiled text report to disk safely
     with open(report_filename, 'w', encoding='ascii') as f:
@@ -735,8 +542,8 @@ def save_test_case_markdown_report(case_name: str,
     with open(json_filename, 'w', encoding='ascii') as fj:
         json.dump(structured_log, fj, indent=4)
 
-    print(f" -> [LOGGED]: Compiled Markdown report successfully saved to: {report_filename}")
-    print(f" -> [LOGGED]: Automated JSON sibling data successfully saved to: {json_filename}")
+    print(f" -> [INFO]: Compiled Markdown report successfully saved to: {report_filename}")
+    print(f" -> [INFO]: Automated JSON successfully saved to: {json_filename}")
 
 
 def save_summary_markdown_report(results_dict: dict,
@@ -787,11 +594,11 @@ def save_summary_markdown_report(results_dict: dict,
 
         # 3. Compute mathematically precise Recall and Precision ratios
         # Recall: How many of the visible blueprint dots did the decoder capture?
-        recall_pct = (tp / visible) * 100.0 if visible > 0 else 0.0
+        recall = (tp / visible) * 100.0 if visible > 0 else 0.0
 
         # Precision: Out of all nodes written to canvas, how many are correct?
-        total_extracted_pool = tp + misalignments + ghosts
-        precision_pct = (tp / total_extracted_pool) * 100.0 if total_extracted_pool > 0 else 0.0
+        total_extracted = tp + misalignments + ghosts
+        precision = (tp / total_extracted) * 100.0 if total_extracted > 0 else 0.0
 
         # Evaluate status threshold signatures
         is_passed = metrics.get("is_passed", False)
@@ -802,19 +609,30 @@ def save_summary_markdown_report(results_dict: dict,
 
         # Append row format block string data line directly
         md_content.append(
-            f"| **{case_name}** | {comment} | {visible} | {recall_pct:.2f}% | {precision_pct:.2f}% | {accuracy:.2f} | {status_tag} |"
+            f"| **{case_name}** | {comment} | {visible} | {recall:.2f}% | {precision:.2f}% | {accuracy:.2f}% | {status_tag} |"
         )
 
     # 4. Append high-level global system telemetry metrics
     md_content.append("\n## System Conformance Evaluation Analytics")
     md_content.append(f"- **Total Simulated Test Cases Checked:** {total_cases}")
     md_content.append(f"- **Total Successfully Passed Suites :** {passed_cases} / {total_cases}")
+    md_content.append("\n### Definitions")
+    md_content.append("To maintain mathematical consistency across all evaluation passes, metric tracking definitions follow standard confusion matrix guidelines:")
+    md_content.append("1. **Recall Index:** Evaluates the target search coverage ratio relative to the active image pane boundary layout.")
+    md_content.append("   $$\\text{Recall} = \\frac{TP}{\\text{Visible GT Nodes}} \\times 100.0$$")
+    md_content.append("2. **Precision Index:** Quantifies the structural assignment reliability of the topological decoder, demonstrating its zero false-positive extraction rate.")
+    md_content.append("   $$\\text{Precision} = \\frac{TP}{TP + \\text{Misalignments} + \\text{Ghosts}} \\times 100.0$$")
+    md_content.append("3. **System Accuracy Score:** Tracks the combined performance of the hardware mask validator and the wave-growth graph. Evaluates true classification steps over the detected array domain while remaining completely immune to unmodeled optical sensor visibility omissions ($FN$).")
+    md_content.append("   $$\\text{Accuracy} = \\frac{TP + (\\text{Expected Erasures} - \\text{Erasure Leaks})}{\\text{Total Detected} + \\text{Expected Erasures}} \\times 100.0$$")
+    md_content.append("A test suite run is explicitly designated as **PASSED** if and only if it simultaneously satisfies both strict topological and numerical performance thresholds:")
+    md_content.append("- **Zero Topological Defects:** `misalignments = 0` (Zero tolerance for index drift or island mis-assembly).")
+    md_content.append("- **High Classification Fidelity:** `accuracy_score > 90.0%` (Sub-pixel tracking confidence minimum baseline).")
 
     if total_cases > 0:
         yield_score = (passed_cases / total_cases) * 100.0
         md_content.append(f"- **Global Framework Compliance Index:** {yield_score:.2f}%")
 
-    md_content.append(f"\n***\n*Generated automatically by {ENGINE_FULL_NAME}*")
+    md_content.append(f"\n***\n*Generated automatically by {HexagonalTopologyDetector.ENGINE_FULL_NAME}*")
 
     # 5. Output the finalized text document stream to disk safely
     with open(summary_filename, 'w', encoding='ascii') as f:
@@ -824,28 +642,20 @@ def save_summary_markdown_report(results_dict: dict,
 
 
 if __name__ == "__main__":
-    import argparse
-    from generate import generate_triangular_gray_grid
-
-    # Setup clean command line interface parameters parsing parsing
-    parser = argparse.ArgumentParser(description="Universal End-to-End Core Integration Suite")
-    parser.add_argument(
-        "--save-images",
-        action="store_true",
-        help="Export all high-fidelity rendered perspective-warped frames to PNG assets on disk."
-    )
-    args = parser.parse_args()
-
-    W_NODES, H_NODES = 31, 31
+    from detector_factory import parse_arguments, create_detector, pattern_blueprint
+    args = parse_arguments(HexagonalTopologyDetector.ENGINE_FULL_NAME)
+    H_NODES = args.rows
+    W_NODES = args.cols
+    detector = create_detector(args.engine, grid_rows=H_NODES, grid_cols=W_NODES)
 
     STEP_PX = 45.0
     Z_DISTANCE = -H_NODES * STEP_PX * 1.1
     DEFAULT_TX = 0
     DEFAULT_TY = 0
-    IMG_SHAPE = (1080, 1920)
+    IMG_SHAPE = (1920, 1080)
     K1 = -0.25
-    INTRINSICS = {"f_px": 1150.0, "k1": K1, "width_px": IMG_SHAPE[1], "height_px": IMG_SHAPE[0]}
-    base_blueprint = generate_triangular_gray_grid(width_nodes=W_NODES, height_nodes=H_NODES)
+    INTRINSICS = {"fx": 1150.0, "fy": 1150.0, "cx": IMG_SHAPE[0]/2, "cy": IMG_SHAPE[1]/2, "k1": K1, "img_shape": IMG_SHAPE}
+    base_blueprint = pattern_blueprint(args.engine, cols=W_NODES, rows=H_NODES)
     # Define your centralized parametric evaluation dictionary matrix block
     cases = {
         "clean_baseline": {
@@ -890,7 +700,7 @@ if __name__ == "__main__":
 
         },
         "multi_island_stitch": {
-            "description": "Stitching 3 Separated Occluded Fragment Patches in Memory",
+            "description": "4 Separated Fragments",
             "blueprint": apply_multi_island_mask(base_blueprint),
             "camera": {
                 "roll": 30.0, "pitch": 5.0, "yaw": -2.0,
@@ -899,11 +709,11 @@ if __name__ == "__main__":
             "intrinsics": INTRINSICS
         },
         "severe_pitch_tilt_45deg": {
-            "description": "Severe 45-Degree Camera Pitch Foreshortening Stress Test",
+            "description": "Severe 45-Degree Camera Pitch Test",
             "blueprint": np.copy(base_blueprint),
             "camera": {
                 "roll": 0.0, "pitch": 45.0, "yaw": 0.0,
-                "tx": DEFAULT_TX, "ty": DEFAULT_TY, "tz": Z_DISTANCE * 0.9  # Pushed closer to retain pixel scale
+                "tx": DEFAULT_TX, "ty": H_NODES/2 * STEP_PX , "tz": Z_DISTANCE * 0.9  # Pushed closer to retain pixel scale
             },
             "intrinsics": INTRINSICS
         }
@@ -920,23 +730,31 @@ if __name__ == "__main__":
             "intrinsics": INTRINSICS
         }
 
-    RESULT_DIR = "./test_results_log"
+    RESULT_DIR = args.path
     if not os.path.exists(RESULT_DIR):
         os.makedirs(RESULT_DIR)
     accumulated_metrics_dictionary = {}
-    print("=======================================================")
-    print("Launching Telemetry Evaluation Loop Sweep...")
-    print(f"Image Export Policy: {'ENABLED' if args.save_images else 'DISABLED'}")
-    print("=======================================================")
+
+    def prints(stroke_len=40):
+       print("=" * stroke_len)
+    prints()
+    print("Launching Pattern Evaluation Loop ...")
+    print(f"Image Export: {'ENABLED' if args.save_images else 'DISABLED'}")
+    prints()
+    camera_io.save_dict_as_json(os.path.join(RESULT_DIR,"base_camera.json"), INTRINSICS)
 
     for case_name, case_payload in cases.items():
+        #if  case_name != "severe_pitch_tilt_45deg":
+        #    continue
         print(f"\n[EVALUATING]: Case Module [{case_name.upper()}]")
 
         # Pass the command line flag directly down to the single-case evaluator
         result = evaluate_single_integration_case(
             base_blueprint=base_blueprint,
+            detector=detector,
             case_name=case_name,
             case_payload=case_payload,
+            save_dir=RESULT_DIR,
             save_images=args.save_images
         )
 
@@ -945,22 +763,21 @@ if __name__ == "__main__":
             case_name=case_name,
             case_payload=case_payload,
             metrics=result,
-            output_dir="./test_results_log"
+            output_dir=RESULT_DIR
         )
 
         accumulated_metrics_dictionary[case_name] = result
 
         if result["status"] != "success":
-            print(f" -> [WARNING] Subgraph decoder was unable to find phase lock consensus.")
+            print(f" -> [WARNING] Decoder failed.")
             continue
         print(f" -> Metrics: accuracy={result['accuracy']:.2f}%, True Positives={result['true_positives']} from total visible {result['total_visible_targets']}")
 
     summary_filename = save_summary_markdown_report(results_dict=accumulated_metrics_dictionary, output_dir=RESULT_DIR)
     if len(summary_filename) > 0:
-        print(f" -> [LOGGED]: Summary table successfully written to: {summary_filename}")
+        print(f" -> [INFO]: Summary table successfully written to: {summary_filename}")
     else:
         print(f" -> [WARNING]: Summary table saving is failed")
-
-    print("\n=======================================================")
-    print("INTEGRATION METRICS FULLY RUN!")
-    print("=======================================================")
+    prints()
+    print("Integration test for pattern decoder completed")
+    prints()

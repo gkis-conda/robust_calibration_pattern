@@ -2,11 +2,8 @@ import bpy
 import mathutils
 import math
 import os
-import numpy as np
 import sys
 import random
-import cv2
-
 
 # 1. Capture the exact absolute folder path where this script resides
 # (Safe for execution via relative paths or system symlinks)
@@ -17,7 +14,7 @@ if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 from detector_factory import *
 from camera import *
-
+from camera_io import save_camera_json
 # ==============================================================================
 # [INSERT YOUR PhysicalMeshGenerator CLASS CODE HERE]
 # ==============================================================================
@@ -30,7 +27,7 @@ METER_TO_MM = lambda x: float(x) * 1000.
 BLENDER_SENSOR_WIDTH_MM = 36.0                 # Standard full-frame sensor metric
 RESOLUTION_PERCENTAGE_FULL = 100               # Scale factor for target frame rendering
 Z_PLANE_FIGHTING_OFFSET_METERS = 0.0001        # Slight offset to prevent mesh clipping
-CYCLES_RAYTRACING_SAMPLES = 18                 # Computation constraints limit
+CYCLES_RAYTRACING_SAMPLES = 25                 # Computation constraints limit
 BLUR_EXPOSURE_SHUTTER_MAX = 1.0                # Keep shutter active across entire frame
 
 # --- JITTER MOTION CHARACTERISTICS ---
@@ -38,7 +35,6 @@ TREMOR_DEG = 1./60                              # Sub-pixel rotational hand shak
 
 # --- CAMERA PARAMETERS DEFINITIONS AND CONSTRAINTS ---
 DEFAULT_TX, DEFAULT_TY, Z_DISTANCE = 0.0, 0.0, -1.5
-K1_DISTORTION = -0.2
 IMG_SHAPE = (1080, 1920)
 
 # --- PATTERN PARAMETERS
@@ -93,7 +89,6 @@ def calculate_lattice_global_offset(mesh_gen):
     raw_w = abs(x_max - x_min)
     raw_h = abs(y_max - y_min)
 
-    # PHYSICAL BOUNDARY FIX: Instead of a magic 1.15 multiplier,
     # we add exactly one full physical step_mm to the total width and height.
     step_meters = MM_TO_METER(mesh_gen.step_mm)
     grid_w = raw_w + 2 * step_meters
@@ -266,10 +261,8 @@ def setup_camera_hardware_distortion(scene, camera_obj, k1):
     Guarantees that lens warp is evaluated BEFORE motion blur bakes, curving
     your tremor trajectories accurately to match true physical sensors.
 
-    Fully compatible with Blender 2.92.0 Cycles engine.
     """
     # 1. Enforce Cycles rendering engine since standard EEVEE does not
-    # support advanced hardware panoramic lens configurations in 2.92
     scene.render.engine = 'CYCLES'
 
     # 2. Switch the camera architecture to Panoramic to unlock lens controls
@@ -294,22 +287,42 @@ def configure_camera(scene,
                      tremor_frame_delta: int) -> None:
     """
     Transforms explicit positional parameters and orientation metrics from OpenCV format,
-    applies physical pixel focal calculations, and executes keyframe animation bindings
-    on an isolated segment of the timeline using a multi-frame pseudo-random walk.
+    applies physical pixel focal calculations (fully supporting fx != fy and cx, cy shifts),
+    and executes keyframe animation bindings.
     """
+    # Raw OpenCV frame resolution boundaries (unscaled by tremor padding)
     w_px = intrinsics["width_px"]
     h_px = intrinsics["height_px"]
-    f_px = intrinsics["f_px"]
 
-    scene.render.resolution_x = w_px * 1.2
-    scene.render.resolution_y = h_px * 1.2
+    fx_px = float(intrinsics["fx_px"])
+    fy_px = float(intrinsics["fy_px"])
+    cx_px = float(intrinsics["cx"])
+    cy_px = float(intrinsics["cy"])
+
+    # With HORIZONTAL sensor fit, fx_px acts as the master scale baseline.
+    # We warp pixel_aspect_y to simulate non-square pixel sensor grids.
+    scene.render.pixel_aspect_x = 1.0
+    scene.render.pixel_aspect_y = fx_px / fy_px
+
+    # --- THE FIXED PRINCIPAL POINT SHIFT LAYER (cx, cy) ---
+    # Blender camera shifts are normalized relative to the master horizontal sensor width.
+    # OpenCV y-axis points down, Blender shift_y points up -> we flip the sign on Y.
+    camera_obj.data.shift_x = -(cx_px - w_px * 0.5) / w_px
+    camera_obj.data.shift_y = (cy_px - h_px * 0.5) / w_px * scene.render.pixel_aspect_y
+
+    # Configure rendering resolutions with your custom tremor padding factor
+    scene.render.resolution_x = w_px
+    scene.render.resolution_y = h_px
     scene.render.resolution_percentage = RESOLUTION_PERCENTAGE_FULL
 
     camera_obj.data.type = 'PERSP'
     camera_obj.data.sensor_fit = 'HORIZONTAL'
     camera_obj.data.lens_unit = 'MILLIMETERS'
-    camera_obj.data.lens = (f_px * BLENDER_SENSOR_WIDTH_MM) / scene.render.resolution_x
 
+    # Calculate millimetric focal length strictly bound to the horizontal resolution axis
+    camera_obj.data.lens = (fx_px * BLENDER_SENSOR_WIDTH_MM) / scene.render.resolution_x
+
+    # --- EXTRACT POSE AND ANIMATE KEYFRAMES ---
     tx = camera_extrinsics.get("tx", 0.0)
     ty = camera_extrinsics.get("ty", 0.0)
     tz = camera_extrinsics.get("tz", 1.0)
@@ -319,53 +332,46 @@ def configure_camera(scene,
 
     camera_obj.constraints.clear()
 
-    R_mat = mathutils.Euler((pitch, yaw, roll), 'YXZ').to_matrix().to_4x4()
+    R_mat = mathutils.Euler((pitch, yaw, roll), 'ZXY').to_matrix().to_4x4()
     T_mat = mathutils.Matrix.Translation((tx, ty, tz))
 
     cv_to_blender_bridge = mathutils.Matrix((
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0, -1.0, 0.0, 0.0],
-        [0.0, 0.0, -1.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0]
+        [1.0,  0.0,  0.0, 0.0],
+        [0.0, -1.0,  0.0, 0.0],
+        [0.0,  0.0, -1.0, 0.0],
+        [0.0,  0.0,  0.0, 1.0]
     ))
 
     target_matrix = T_mat @ R_mat @ cv_to_blender_bridge
     loc, rot_quat, _ = target_matrix.decompose()
-    # -----------------------------------------------------------------
-    # FRAME N ENTRY POINT: LOCK THE BASELINE OPENCV POSE
-    # -----------------------------------------------------------------
+
     scene.frame_set(start_frame)
 
     camera_obj.location = loc
     camera_obj.rotation_mode = 'XYZ'
     camera_obj.rotation_euler = rot_quat.to_euler(camera_obj.rotation_mode)
 
+    # Insert keyframes for the baseline position and parameters
     camera_obj.keyframe_insert(data_path="location", frame=start_frame)
     camera_obj.keyframe_insert(data_path="rotation_euler", frame=start_frame)
+    camera_obj.data.keyframe_insert(data_path="shift_x", frame=start_frame)
+    camera_obj.data.keyframe_insert(data_path="shift_y", frame=start_frame)
 
-    # Freeze the random state vector seed using your case index to guarantee 100%
-    # repeatable, deterministic noise paths across regression test sweeps.
     random.seed(start_frame)
 
-    # Maintain a rolling reference accumulator copy of your primary rotation state
     rolling_rot_x = camera_obj.rotation_euler.x
     rolling_rot_y = camera_obj.rotation_euler.y
     rolling_rot_z = camera_obj.rotation_euler.z
 
-    # Step sequentially through each allocated tremor frame slot step
     for target_frame_idx in range(start_frame + 1, start_frame + tremor_frame_delta + 1):
         scene.frame_set(target_frame_idx)
 
-        # Calculate random gait displacements using a normal Gaussian distribution
-        # centered at zero, scaled by your tremor intensity bounds
         delta_pitch = random.uniform(-TREMOR_DEG, TREMOR_DEG)
         delta_yaw = random.uniform(-TREMOR_DEG, TREMOR_DEG)
 
-        # Accumulate the random walk offsets natively
         rolling_rot_x += math.radians(delta_pitch)
         rolling_rot_y += math.radians(delta_yaw)
 
-        # Assign updated fields to primitive tracks and insert keyframe channels
         camera_obj.rotation_euler = (rolling_rot_x, rolling_rot_y, rolling_rot_z)
         camera_obj.keyframe_insert(data_path="rotation_euler", frame=target_frame_idx)
 
@@ -380,8 +386,8 @@ def export_ground_truth_labels(mesh_gen, labels, intrinsics, camera_extrinsics, 
     """
     h, w = labels.shape
     camera = ProjectiveCamera((intrinsics["width_px"], intrinsics["height_px"]),
-                              intrinsics["f_px"], intrinsics["f_px"],
-                              intrinsics["width_px"] / 2, intrinsics["height_px"] / 2,
+                              intrinsics["fx_px"], intrinsics["fy_px"],
+                              intrinsics["cx"], intrinsics["cy"],
                               intrinsics["k1"])
 
     tx = camera_extrinsics.get("tx", 0.0)
@@ -461,9 +467,10 @@ def apply_distortion(image_name, camera_inst, output_path):
     a custom distortion method, and pushes the modified buffer back
     into Blender for saving.
     """
-    blender_image = bpy.data.images.load(output_path, check_existing=True)
+    absolute_path = os.path.abspath(image_name)
+    blender_image = bpy.data.images.load(absolute_path, check_existing=True)
     if not blender_image:
-        print("Error: Blender image block '{}' not found.".format(image_name))
+        print("Error: Image'{}' not found.".format(image_name))
         return
 
     # 2. Extract resolution properties from the container
@@ -494,36 +501,13 @@ def apply_distortion(image_name, camera_inst, output_path):
 
     # Update the internal image state and force the UI to redraw if necessary
     blender_image.update()
-    blender_image.filepath_raw = output_path
+    blender_image.filepath_raw = os.path.abspath(output_path)
     blender_image.save()
     bpy.data.images.remove(blender_image)
     print("-> Successfully processed and saved frame at: {}".format(output_path))
 
 
-# ==============================================================================
-# MAIN TEST BED RUNNER EXECUTION FLOW
-# ==============================================================================
-if __name__ == "__main__":
-
-    args = parse_arguments()
-    
-    # 2. Global metric dimensions setup 
-    LATTICE_ROW_COUNT = args.rows
-    LATTICE_COL_COUNT = args.cols
-    
-    # 3. Concatenate and build target storage directories paths
-    BASE_PATH = "./blender_output"
-    ENGINE_SPECIFIC_DIR = os.path.abspath(f"{BASE_PATH}_{args.engine}")
-    if not os.path.exists(ENGINE_SPECIFIC_DIR):
-        os.makedirs(ENGINE_SPECIFIC_DIR)
-
-    base_blueprint = pattern_blueprint_factory(
-         engine_name=args.engine,
-         rows=LATTICE_ROW_COUNT,
-         cols=LATTICE_COL_COUNT
-    )
-    intrinsics = {"f_px": 1150.0, "k1": K1_DISTORTION, "width_px": IMG_SHAPE[1], "height_px": IMG_SHAPE[0]}
-    # --- TEST CASES DICTIONARY SPECIFICATION ---
+def hexagonal_rotations_cases(intrinsics, base_blueprint):
     cases = {
         "clean_baseline": {
            "description": "Pristine Baseline Frame (Standard Centered Orientation)",
@@ -548,6 +532,98 @@ if __name__ == "__main__":
                        "tz": Z_DISTANCE},
             "intrinsics": intrinsics
         }
+    return cases
+
+
+def random_tilt_cases(intrinsics, base_blueprint):
+    """
+    Generates a structured test case suite in pure photogrammetric coordinates.
+    FIX: Corrects the translation compensation vector along the photogrammetric
+    X-axis to align perfectly with positive Yaw rotations.
+    """
+    random.seed(42)
+
+    num_random_cases = 8
+    rolls  = [random.uniform(0.0, 360.0) for _ in range(num_random_cases)]
+    pitchs = [random.uniform(5.0, 45.0)  for _ in range(num_random_cases)]
+    yaws   = [random.uniform(0.0, 18.0)  for _ in range(num_random_cases)]
+
+    base_tx = DEFAULT_TX
+    base_ty = DEFAULT_TY
+    base_tz = Z_DISTANCE
+
+    cases = {
+        "clean_baseline": {
+            "description": "Pristine Baseline Frame (Standard Centered Orientation)",
+            "blueprint": np.copy(base_blueprint),
+            "camera": {"roll": 0.0, "pitch": 0.0, "yaw": 0.0, "tx": base_tx, "ty": base_ty, "tz": base_tz},
+            "intrinsics": intrinsics
+        }
+    }
+
+    for idx in range(num_random_cases):
+        roll  = rolls[idx]
+        pitch = pitchs[idx]
+        yaw   = yaws[idx]
+
+        pitch_rad = math.radians(pitch)
+        yaw_rad   = math.radians(yaw)
+
+        comp_tx = base_tx - (base_tz * math.tan(yaw_rad))
+        comp_ty = base_ty - (base_tz * math.tan(pitch_rad))
+        comp_tz = base_tz
+
+        cases[f"compound_rotation_{idx}"] = {
+            "description": f"Compound Orientation {idx} (Roll: {roll:.2f}, Pitch: {pitch:.2f}, Yaw: {yaw:.2f})",
+            "blueprint": np.copy(base_blueprint),
+            "camera": {
+                "roll": roll,
+                "pitch": pitch,
+                "yaw": yaw,
+                "tx": comp_tx + random.uniform(-0.01, 0.01),
+                "ty": comp_ty + random.uniform(-0.01, 0.01),
+                "tz": comp_tz
+            },
+            "intrinsics": intrinsics
+        }
+
+    return cases
+
+
+# ==============================================================================
+# MAIN EXECUTION FLOW
+# ==============================================================================
+if __name__ == "__main__":
+
+    args = parse_arguments()
+    
+    # 1. Global setup
+    LATTICE_ROW_COUNT = args.rows
+    LATTICE_COL_COUNT = args.cols
+    
+    if args.path == "":
+        BASE_PATH = "./blender_output"
+        ENGINE_SPECIFIC_DIR = os.path.abspath(f"{BASE_PATH}_{args.engine}")
+    else:
+        ENGINE_SPECIFIC_DIR = args.path
+        if not os.path.isabs(ENGINE_SPECIFIC_DIR):
+            ENGINE_SPECIFIC_DIR = os.path.join('.', ENGINE_SPECIFIC_DIR)
+    if not os.path.exists(ENGINE_SPECIFIC_DIR):
+        os.makedirs(ENGINE_SPECIFIC_DIR)
+
+    base_blueprint = pattern_blueprint(
+         engine_name=args.engine,
+         rows=LATTICE_ROW_COUNT,
+         cols=LATTICE_COL_COUNT
+    )
+    if "tilt" in ENGINE_SPECIFIC_DIR:
+        hard_intrinsics = {"fx_px": 1250.0, "fy_px": 1150.0, "k1": -0.15, "width_px": IMG_SHAPE[1], "height_px": IMG_SHAPE[0],
+                      "cx": IMG_SHAPE[1]/2 + 5, "cy": IMG_SHAPE[0]/2 + 3}
+        cases = random_tilt_cases(hard_intrinsics, base_blueprint)
+    else:
+        soft_intrinsics = {"fx_px": 1150.0, "fy_px": 1150.0, "k1": -0.2, "width_px": IMG_SHAPE[1], "height_px": IMG_SHAPE[0],
+                      "cx": IMG_SHAPE[1]/2, "cy": IMG_SHAPE[0]/2}
+        cases = hexagonal_rotations_cases(soft_intrinsics, base_blueprint)
 
     scene_inst, cam_inst = initialize_blender_scene()
 
@@ -563,16 +639,15 @@ if __name__ == "__main__":
             step_mm=PATTERN_STEP_MM,
             r_circ=PRIMITIVE_RADIUS_MM
         )
-
         pattern_obj = build_3d_pattern_mesh(
             case_name=case_name,
             mesh_gen=mesh_gen
         )
-
+        intrinsics = data["intrinsics"]
         configure_camera(
             scene=scene_inst,
             camera_obj=cam_inst,
-            intrinsics=data["intrinsics"],
+            intrinsics=intrinsics,
             camera_extrinsics=data["camera"],
             start_frame=rolling_frame,
             tremor_frame_delta = TREMOR_FRAMES_NUM
@@ -586,9 +661,16 @@ if __name__ == "__main__":
         )
         img_out_path = os.path.join(ENGINE_SPECIFIC_DIR, f"{case_name}_{rolling_frame:04d}.png")
         camera = ProjectiveCamera((intrinsics["width_px"], intrinsics["height_px"]),
-                                  intrinsics["f_px"], intrinsics["f_px"],
-                                  intrinsics["width_px"] / 2, intrinsics["height_px"] / 2,
+                                  intrinsics["fx_px"], intrinsics["fy_px"],
+                                  intrinsics["cx"], intrinsics["cy"],
                                   intrinsics["k1"])
+        try:
+            cam_json_path = os.path.join(ENGINE_SPECIFIC_DIR, f"{case_name}_{rolling_frame:04d}_camera.json")
+            save_camera_json(cam_json_path, camera, include_K=True)
+            print(f" -> [INFO] Saved camera config: {cam_json_path}")
+        except Exception as e:
+            print(f" -> [Warning] failed to save camera config: {e}")
+
         apply_distortion(img_out_path, camera, img_out_path)
         # Clear operational context before launching trailing array cases iterations
         cleanup_pattern_instance(pattern_obj)
