@@ -29,7 +29,7 @@ The fast and robust calibration of multi-sensor devices in self-navigating syste
 
 The calibration of multi-sensor setups, particularly Visual-Inertial Navigation Systems (VINS), faces severe challenges when resolving coupled spatiotemporal parameters. These difficulties are frequently compounded by partial occlusions, rapid tracking accelerations, and illumination variations when using standard calibration targets. To address these vulnerabilities, this paper introduces a novel calibration pattern that embeds error-correcting pseudo-random codes directly onto a regular hexagonal lattice.
 
-Circle grids, tag-based fiducials like AprilTags [@olson2011apriltag], ArUco [@garrido2014aruco], or WhyCode [@lightbody2017whycode], and chessboard or ChArUco patterns remain the industrial standards for camera calibration [@zhang2000]. However, these classical methodologies present significant operational constraints in unconstrained real-world environments:
+Circle grids, tag-based fiducials like AprilTags [@Olson2011AprilTag], ArUco [@garrido2014aruco], or WhyCode [@lightbody2017WhyCode], and chessboard or ChArUco patterns remain the industrial standards for camera calibration [@zhang2000]. However, these classical methodologies present significant operational constraints in unconstrained real-world environments:
 
 * **Occlusions and Spatial Payload Overhead:** Fiducial markers require intact tag matrices to resolve absolute identification, leaving them vulnerable to partial occlusions, lens defocus, and heavy perspective warping.
 * **Blur Sensitivity:** Standard checkerboard corner extraction algorithms degrade rapidly under motion or out-of-focus blur, restricting calibration workflows to static, heavily controlled multi-frame capture routines.
@@ -66,7 +66,6 @@ Assembles unorganized sub-pixel barycenters into stable hexagonal coordinate net
 Evaluates each crystalline segment by applying local 4-node XOR sliding kernels, isolating three independent 1D stream vectors:
 * **U-axis:** $dU[i] = B[r, c+1] \oplus B[r, c+2] \oplus B[r+1, c] \oplus B[r+1, c+1]$
 * **W-axis:** $dW[i] = B[r, c] \oplus B[r, c+1] \oplus B[r+1, c] \oplus B[r+1, c+1]$
-* **V-axis:** Distillation not used in the current implementation.
 
 These differential operators perfectly cancel two of the three component sequences, yielding clean, independent 1D M-sequence fragments.
 
@@ -79,8 +78,6 @@ Merges resolved phases from independent orthogonal axes to establish absolute gl
 ### 6. Decoupled Camera Calibration
 The restored hexagonal lattice provides perfect sets of collinear lines easily extracted along hexagonal directions to enable a plumb-line calibration approach. Unlike traditional joint optimization methods for the Brown-Conrady model [@brown1971close] that couple distortion parameters and intrinsic variables, the framework employs a two-stage cascaded decoupling strategy:
 * **Stage A (Distortion Recovery):** Optimize the radial lens distortion coefficient $\kappa_1$ and distortion center $(c_x, c_y)$ directly from raw plumb-line inputs, minimizing Menger curvature loss with a fixed focal distance aperture [@de2011uncalibrated].
-* **Stage B (Intrinsic Calibration):** Apply the resolved radial distortion correction to the detected points. Fit vanishing point geometry on the rectified, undistorted image space using a robust consensus homography estimation to recover focal lengths $(f_x, f_y)$ and principal point offsets $(c_x, c_y)$ utilizing Zheng's geometric invariants method [@zheng2013geometric].
-
 * **Stage B (Intrinsic Calibration):** Apply the resolved distortion correction to the detected points. Having undistorted ideal lines, it is possible to reconstruct vanishing points and apply Zhang's closed-form solution for intrinsics recovery via planar homography [@zhang2000; @zheng2013geometric]. Then, the radial distortion parameter $\kappa_1$ is renormalized to this calculated calibration to fully restore the final Brown-Conrady model [@brown1971close].
 
 This decoupling eliminates parameter cross-talk and ensures fast, stable convergence even under degenerate geometric configurations, such as pure rotational sequences or extreme perspective views.
@@ -173,7 +170,7 @@ Single-frame execution under pure rotational roll configurations introduces stan
 
 ## Limitations
 
-* **Centroid Detection Sensitivity:** Under extreme motion blur or severe sensor noise, contour fragmentation degrades sub-pixel centroid accuracy, affecting lattice reconstruction.
+* **Centroid Detection Sensitivity:** Under extreme motion blur or severe sensor noise, contour fragmentation degrades sub-pixel centroid accuracy and shape classification, affecting lattice reconstruction.
 * **Minimal Decoding Block Dimension:** For successful spatial decoding, the framework requires at least an $11 \times 2$ node block footprint with a limited density of omissions and errors.
 * **Error Doubling Effect:** Every node misclassification or recognition dropout leads to a doubled error or erasure in the distilled 1D sequence due to the properties of the local 4-node XOR differential kernels, limiting the overall error-correction capability.
 * **Error Correction Saturation:** Decoding fails if multi-bit errors or consecutive omission bursts violate the underlying error-isolation and algebraic subspace boundaries [@macwilliams1977theory].

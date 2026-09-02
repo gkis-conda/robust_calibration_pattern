@@ -20,8 +20,8 @@ By encoding one-dimensional Galois Field M-sequences over a regular hexagonal la
 The pattern's architecture merges 1D Linear Feedback Shift Register (LFSR) coding theory with discrete projectively warped hexagonal geometry:
 
 1. **Lattice Topology:** The pattern is represented by a regular hexagonal grid layout, offering mathematically proven maximum node coverage, Delaunay triangulation robustness, and an unbiased spatial distribution of points. It provides high performance in nearest-neighbor search tasks and provides excellent resilience against response ambiguity caused by perspective distortion.
-2. **Barycentric Closing Balance:** Three orthogonal 1D M-sequences slide across the U, V, and W diagonal axes, rigidly locked by the global spatial coordinate invariant:
-   \[u + v + w = 0\]
+2. **Barycentric Closing Balance:** Three orthogonal 1D $M$-sequences slide across the $U$, $V$, and $W$ diagonal axes, rigidly locked by the global spatial coordinate invariant:
+   $u + v + w = 0$
 3. **Syndrome-Based Sequence Decoder:** Detects pattern view orientation and absolute location from an isolated pattern fragment, automatically correcting moderate detection noise and recognition dropouts via a greedy decoding pass.
 4. **Decoupled Calibration:** Employs a split calibration approach to completely avoid the parameter-coupling problems inherent to the standard Brown-Conrady model. This mathematical separation enables highly accurate camera parameter recovery from a single planar view of the scene.
 
