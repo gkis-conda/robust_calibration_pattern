@@ -173,11 +173,29 @@ def analyze_error_convergence_with_masks(u_errors: list, u_gaps: list, w_errors:
     return False, []
 
 
+def strip(buffer, sym = 0):
+    width = len(buffer)
+    start = width
+    for c in range(0, width, 1):
+        if buffer[c] != sym:
+            start = c
+            break
+
+    finish = start + 1
+    for e in range(width - 1, start, -1):
+        if buffer[e] != sym:
+            finish = e + 1
+            break
+    return start, finish
+
+
 class AlgebraicGridDecoder32:
     """
     retrieve barycentric coordinates
     """
-    def __init__(self, grid_width, grid_height, debug_output:bool = True):
+    MIN_UNIQUE_SEQUENCE_LEN = 11
+
+    def __init__(self, grid_width, grid_height, debug_output:bool = False):
         """Initializes the main grid environment and registers all 6 directional decoders."""
         self.r = 5  # Base polynomial degree
         self.lfsr_period = (1 << self.r) - 1
@@ -314,7 +332,8 @@ class AlgebraicGridDecoder32:
             "b":(u, v, w), # detected coordinates in blueprint
             "horizontal_axis": horiz_axis,
             "direction": horiz_dir,
-            "errors_corrected": len(status_horiz.get("errors_corrected")) + len(status_vert.get("errors_corrected"))
+            "errors_corrected": len(status_horiz.get("errors_corrected")) + len(status_vert.get("errors_corrected")),
+            "erasures":  len(status_horiz.get("missing_gaps")) + len(status_vert.get("missing_gaps"))
         }
 
 
@@ -395,21 +414,24 @@ class AlgebraicGridDecoder32:
             res_v["errors_corrected"], res_v["missing_gaps"])
         return consistent
 
-    def decode_barycentric_subgraph(self, patch: np.ndarray):
+    def decode_barycentric_subgraph(self, patch: np.ndarray, best_result=None):
         """Tests the patch rows against all 6 directional polynomials to find the absolute position.
 
         Bypasses memory rotations. Leverages the external BarycentricSignalIsolator to extract
         clean horizontal and vertical bit vectors. Resolves complete coordinate indexing.
         """
-        MIN_VALID_BITS_NUM = 9
         assert isinstance(patch, np.ndarray), "Patch must be a NumPy array"
 
-        best_result = {"status": "error",
-                       "errors_corrected" : 100}
+        if best_result is None:
+            best_result = {"status": "error"}
 
+        MIN_VALID_BITS_NUM = 9
         # 1. Isolate the primary horizontal lane bits from the incoming patch
         isolated_bits_h, valid_mask_h = BarycentricSignalIsolator.isolate_u_axis(patch)
-
+        if self.debug_output:
+            print("valid_mask:", valid_mask_h)
+            print("patch:\n", patch)
+        best_solution_found = False
         # 2. Evaluate all 6 direction decoders to identify the horizontal axis orientation
         for direction_key, decoder in self.decoders.items():
             res_h = decoder.analyze(isolated_bits_h, valid_mask_h)
@@ -429,49 +451,44 @@ class AlgebraicGridDecoder32:
                     if self.check_error_consistency(res_h, res_v):
                         if np.count_nonzero(valid_mask_v) < MIN_VALID_BITS_NUM and\
                                 np.count_nonzero(valid_mask_h) < MIN_VALID_BITS_NUM:
-                            # the sequence may be not unique (this question should be considered separately)
+                            # the sequence may be not unique even if decoded corrrectly (this question should be considered separately)
                             continue
                         # Translate lattice spaces back to absolute flat matrix positions
                         result = self.resolve_cell_index(res_h, res_v)
                         if self.debug_output:
                             print(result)
-                        if result["status"] == "success" and result['errors_corrected'] < best_result['errors_corrected']:
-                            best_result = result
+                        if result["status"] == "success":
+                            if best_result["status"] != "success" or\
+                                result['errors_corrected'] < best_result['errors_corrected']\
+                                or result['errors_corrected'] == best_result['errors_corrected']\
+                                    and result['erasures'] < best_result['erasures']:
+                                best_result = result
+                                best_solution_found = True
+                                print("[Info] Consistency check passed. Best result updated.")
                     else:
-                        print("Error consistency check failed")
-
-        return best_result
+                        print("[Warning] Consistency check failed. Skip")
+        if best_solution_found:
+            return best_result
+        else:
+            return {"status": "update failed"}
 
     def localize_grid(self, island):
         h, w = island.shape
         result = {
                 "status": "failed",
-                "message": "decoder cannot match target"
+                "message": "decoder cannot match target",
             }
-        MIN_UNIQUE_SEQUENCE_LEN = 11
-        MIN_LEN = MIN_UNIQUE_SEQUENCE_LEN + 1 # + 1 for differentiation, also error check requires 5 + 2 * err_count
+        # +1 for differentiation, also error check requires 5 + 2 * err_count
+        MIN_LEN = self.MIN_UNIQUE_SEQUENCE_LEN + 1
         if island.shape[1] < MIN_LEN or island.shape[0] < 2:
             return {
                 "status": "failed",
                 "message": "too small island to decode"
             }
         for r in range(h - 1):
-            start = w
-            for c in range(0, w, 1):
-                if island[r, c] >= 0:
-                    start = c
-                    break
-
-            finish = start + 1
-            for e in range(w - 1, start, -1):
-                if island[r, e] >= 0:
-                    finish = e + 1
-                    break
-            L = finish - start
-            valid = np.count_nonzero(np.where(island[r, start:finish] != -1))
-            if valid < MIN_LEN:
-                continue
-            valid = np.count_nonzero(np.where(island[r + 1, start:finish] != -1))
+            mask = (island[r,:] != -1) & (island[r + 1,:] != -1)
+            start, finish = strip(mask)
+            valid = np.count_nonzero(mask[start:finish])
             if valid < MIN_LEN:
                 continue
 
@@ -480,18 +497,16 @@ class AlgebraicGridDecoder32:
             else:
                 if start & 1 == 0:
                     start = 1 if start == 0 else start - 1
-            L = finish - start
+
             if self.debug_output:
-                print(f"row: {r}, col {start}, length: {L}")
-            if L < MIN_LEN:
-                continue
+                print(f"row: {r}, col {start}, length: {finish - start}")
             sub_island = island[r:r+2, start:finish]
-            result = self.decode_barycentric_subgraph(sub_island)
-            if result["status"] == "success":
+            updated = self.decode_barycentric_subgraph(sub_island, result)
+            if updated["status"] == "success":
                 if self.debug_output:
                     print(sub_island)
+                result = updated
                 result["source_row"], result["source_col"] = r, start
-                break
         return result
 
 
@@ -513,14 +528,16 @@ def test_resolve_cell_index(decoder):
         "status": "success",
         "direction_key": "U_forward",
         "origin_stream_phase": 6,  # Absolute u phase
-        "errors_corrected": []
+        "errors_corrected": [],
+        "missing_gaps": []
     }
 
     mock_vert = {
         "status": "success",
         "direction_key": "V_forward",
         "origin_stream_phase": 4,  # Absolute v phase
-        "errors_corrected": []
+        "errors_corrected": [],
+        "missing_gaps": []
     }
 
     res_1 = decoder.resolve_cell_index(mock_horiz_u, mock_vert)
@@ -542,7 +559,8 @@ def test_resolve_cell_index(decoder):
         "status": "success",
         "direction_key": "W_reverse",  # Changed token string to "W_reverse"
         "origin_stream_phase": 10,  # Absolute w phase
-        "errors_corrected": [1]
+        "errors_corrected": [1],
+        "missing_gaps": []
     }
 
     res_2 = decoder.resolve_cell_index(mock_horiz_w, mock_vert)
@@ -564,7 +582,8 @@ def test_resolve_cell_index(decoder):
         "direction_key": "U_forward",
         "found_at_window_offset": 2,
         "origin_stream_phase": 16 + 2,
-        "errors_corrected": []
+        "errors_corrected": [],
+        "missing_gaps": []
     }
 
     mock_offset_vert = {
@@ -572,7 +591,8 @@ def test_resolve_cell_index(decoder):
         "direction_key": "V_forward",
         "found_at_window_offset": 1,
         "origin_stream_phase": 12 + 1,
-        "errors_corrected": []
+        "errors_corrected": [],
+        "missing_gaps": []
     }
 
     res_3 = decoder.resolve_cell_index(mock_offset_horiz, mock_offset_vert)

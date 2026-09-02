@@ -214,6 +214,8 @@ def rotate_barycentric_matrix_adaptive(original_matrix: np.ndarray, k: int) -> t
     Rotates a barycentric matrix by (k * 60) degrees CCW with adaptive canvas resizing.
     Evaluates bounding box limits strictly within the discrete (r, c) storage matrix space,
     but performs the local window translations inside the linear topological domain.
+    'adaptive' just means to shift row column indexes into positive domain and return the rotated matrix and actual
+    coordinates shift
     """
     H_orig, W_orig = original_matrix.shape
     steps = k % 6
@@ -451,17 +453,6 @@ class IslandDSU:
         
         return root1, root2
 
-    def disjunction(self, root_id):
-        """
-        Clears and breaks down an entire island tree knowing only its master parent root ID.
-        Resets all member nodes back to isolated singletons with a size of 1.
-        """
-        # Scan the flat parent array. Any node pointing directly to root_id
-        # (or the root_id itself) belongs to the corrupt island.
-        for idx in range(len(self.parents)):
-            if self.parents[idx] == root_id:
-                self.parents[idx] = idx
-                self.sizes[idx] = 1
 
 # =========================================================================
 # UNIT TESTS SECTION

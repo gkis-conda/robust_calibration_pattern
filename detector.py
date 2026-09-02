@@ -7,6 +7,7 @@ from optimization import *
 import camera_io
 import cv2
 
+
 def map_matrix_indices(matrix, labels):
     labels_map = matrix.copy()
     h,w = labels_map.shape[:2]
@@ -244,7 +245,7 @@ def map_island_indices_to_blueprint(
 
 def verify_topological_matrix(topological_matrix: np.ndarray,
                               blueprint_matrix: np.ndarray,
-                              labels: list) -> int:
+                              labels: list):
     """
     Cross-checks the populated topological tracking matrix against the master
     blueprint matrix using real physical label bit assignments.
@@ -280,7 +281,7 @@ def verify_topological_matrix(topological_matrix: np.ndarray,
                 label_status[point_idx] = HexagonalTopologyDetector.MISCLASSIFIED
 
     mask = (label_status != HexagonalTopologyDetector.MISCLASSIFIED)
-    mask[list(correct)] = False
+    mask[list(correct)] = 0
     label_status[mask] = HexagonalTopologyDetector.GHOST
     return wiped_count, label_status
 
@@ -319,6 +320,9 @@ class HexagonalTopologyDetector:
             if debug_overlay:
                 visualize_reconstructed_grid(img, island, pts)
             island_label_map = map_matrix_indices(island, labels)
+            if island_label_map.shape[0] < self.decoder.MIN_UNIQUE_SEQUENCE_LEN and \
+                island_label_map.shape[1] < self.decoder.MIN_UNIQUE_SEQUENCE_LEN:
+                continue # sort islands by size and use the sequence
             for k in range(6):
                 rotated_map, _ = rotate_barycentric_matrix_adaptive(island_label_map, k)
                 match_result = self.decoder.localize_grid(rotated_map)
