@@ -467,7 +467,7 @@ def solve_multi_frame_zhang_matrix(multi_frame_vps: list, cx: float, cy: float) 
 # ===========================================================================================================
 
 
-def strategy_nelder_mead(frame:FrameBundle, master_cam:ProjectiveCamera, coarse=True) -> tuple:
+def strategy_nelder_mead(frame: FrameBundle, master_cam: ProjectiveCamera, coarse=True) -> tuple:
     """
     Preserved Classic Nelder-Mead Optimization Strategy.
     Returns: tuple -> (solved_k1_ap, solved_cx, solved_cy)

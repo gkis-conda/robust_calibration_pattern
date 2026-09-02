@@ -1,10 +1,11 @@
 import numpy as np
-from scipy.spatial import cKDTree
 from generate import PhysicalMeshGenerator
 from camera import compute_camera_projection_matrix, ProjectiveCamera
 from detector import *
 import json
 import os
+from run_validation import draw_topology_scene, \
+    make_blueprint_dict, classify_topology_nodes, compute_topology_statistics, get_precision_threshold
 
 
 def render_warped_grid_shapes(mesh_generator, cam: ProjectiveCamera, R: np.ndarray, t: np.ndarray) -> np.ndarray:
@@ -39,6 +40,7 @@ def inject_matrix_erasures(blueprint: np.ndarray, erasure_probability: float) ->
     Simulates dirt, physical print damage, or local camera sensor dead zones.
     """
     corrupted = np.copy(blueprint)
+    np.random.seed(42)
     random_mask = np.random.rand(*blueprint.shape)
     corrupted[random_mask < erasure_probability] = -1
     return corrupted
@@ -52,11 +54,9 @@ def inject_matrix_bit_flips(blueprint: np.ndarray, flip_probability: float) -> n
     """
     corrupted = np.copy(blueprint)
     H, W = blueprint.shape
-    for r in range(H):
-        for c in range(W):
-            point_idx = blueprint[r, c]
-            if point_idx >= 0 and np.random.rand() < flip_probability:
-                corrupted[r, c] = point_idx ^ 1
+    np.random.seed(37)
+    random_mask = np.random.rand(*blueprint.shape)
+    corrupted[random_mask < flip_probability] ^= 1
     return corrupted
 
 
@@ -114,143 +114,6 @@ def apply_multi_island_mask(base_blueprint: np.ndarray) -> np.ndarray:
 
     return modified_blueprint
 
-
-def calculate_reconstruction_metrics(topological_matrix: np.ndarray,
-                                     detected_points: np.ndarray,
-                                     base_blueprint: np.ndarray,
-                                     modified_blueprint: np.ndarray,
-                                     generator,
-                                     camera,
-                                     R: np.ndarray, t: np.ndarray,
-                                     max_matching_dist_px: float = 4.0) -> dict:
-    """
-    Computes precise performance and topological divergence statistics by building
-    a KD-Tree from live sensor detections and scanning the ground-truth blueprint.
-
-    Args:
-        topological_matrix (np.ndarray): Decoded tracking map lookup table framework.
-        detected_points (np.ndarray): Raw 2D pixel coordinates found by blob finder.
-        base_blueprint (np.ndarray): The master binary reference matrix layout pattern.
-        modified_blueprint (np.ndarray): The active modified blueprint carrying erasures.
-        generator (obj): The active PhysicalMeshGenerator tracking the pattern dots.
-        camera (obj): The ProjectiveCamera hardware parameters abstraction layer object.
-        Rt (np.ndarray): Camera translation and rotation extrinsics matrix.
-        max_matching_dist_px (float): Strict sub-pixel radius threshold lock.
-
-    Returns:
-        dict: High-utility telemetry metrics (accuracy, misalignments, slips).
-    """
-    H_nodes, W_nodes = base_blueprint.shape
-
-    if detected_points is None or len(detected_points) == 0:
-        return {
-            "accuracy": 0.0, "true_positives": 0, "total_visible_targets": 0,
-            "misalignments": 0, "graph_skips": 0, "optical_misses": 0, "ghost_nodes": 0,
-            "expected_erasures": 0, "erasure_leaks": 0
-        }
-
-    # 1. STEP A: BUILD GEOMETRIC SEARCH TREE FROM DETECTED FEATURES
-    detected_kdtree = cKDTree(detected_points)
-
-    processed_detection_ids = set()
-
-    # Initialize our strict telemetry tracking bins
-    total_visible_targets = 0
-    true_positives = 0
-    misalignments = 0
-    graph_skips = 0
-    optical_misses = 0
-    expected_erasures = 0
-    erasure_leaks = 0
-
-    # 2. STEP B: SWEEP ALONG THE EXPLICIT REFERENCE BLUEPRINT TRACKS
-    for r_true in range(H_nodes):
-        for c_true in range(W_nodes):
-            if base_blueprint[r_true, c_true] < 0:
-                continue
-
-            # Check modification layout: Is this node intentionally erased?
-            is_erased_target = (modified_blueprint[r_true, c_true] < 0)
-
-            # Query the precise non-warped world coordinate center from the generator
-            node_world_center = generator.get_shape_center(r_true, c_true)
-            pt = camera.project_point(node_world_center, R, t)
-
-            # Enforce native viewport camera visibility clipping walls
-            if pt is None or not camera.is_visible(pt):
-                continue
-
-            if not is_erased_target:
-                total_visible_targets += 1
-
-            x_true, y_true = pt[0], pt[1]
-
-            # Match the ideal camera target to the nearest physical detected blob on sensor
-            distance, point_idx = detected_kdtree.query([x_true, y_true])
-
-            if distance > max_matching_dist_px:
-                if is_erased_target:
-                    # EXPECTED ERASURE: Omitted node was correctly ignored by everything
-                    expected_erasures += 1
-                else:
-                    # OPTICAL MISS: Node is inside view limits, but blob finder skipped it completely
-                    optical_misses += 1
-                continue
-
-            if is_erased_target:
-                # ERASURE LEAK: A blob was found, but it sits inside an intended erasure zone
-                processed_detection_ids.add(point_idx)
-                erasure_leaks += 1
-                continue
-
-            processed_detection_ids.add(point_idx)
-
-            # Cross-examine your wave-growth matrix lookup table using the active point ID
-            decoded_locations = np.argwhere(topological_matrix == point_idx)
-
-            if len(decoded_locations) == 0:
-                # GRAPH SKIP: Blob was found on screen, but wave-growth graph failed to reach it
-                graph_skips += 1
-                continue
-
-            # Extract decoded local grid addresses from the matches
-            r_dec, c_dec = int(decoded_locations[0][0]), int(decoded_locations[0][1])
-
-            if r_dec == r_true and c_dec == c_true:
-                true_positives += 1
-            else:
-                misalignments += 1
-
-    # 3. STEP C: CAPTURE UNMATCHED GHOST ARTIFACTS
-    # Any blob recorded by camera but missing entirely from the master target board blueprint
-    detected_points_num = len(detected_points)
-    ghost_nodes = detected_points_num - len(processed_detection_ids)
-
-    # 4. CALCULATE DEFINITIVE PERFORMANCE YIELD SCORES
-    # Accuracy is evaluated strictly over what points were physically observable on screen
-    if detected_points_num > 0:
-        true_negative = expected_erasures - erasure_leaks
-        accuracy_score = (true_positives + true_negative) / (detected_points_num + expected_erasures) * 100.0
-    else:
-        accuracy_score = 0.0
-
-    # STABILITY CRITERIA CHECK: Pass if accuracy is >= 90% and there are ZERO false positives
-    is_case_passed = (accuracy_score >= 90.0) and (misalignments == 0)
-
-    return {
-        "is_passed": is_case_passed,
-        "accuracy": accuracy_score,
-        "true_positives": true_positives,
-        "total_visible_targets": total_visible_targets,
-        "misalignments": misalignments,
-        "graph_skips": graph_skips,
-        "optical_misses": optical_misses,
-        "ghost_nodes": ghost_nodes,
-        "expected_erasures": expected_erasures,
-        "erasure_leaks": erasure_leaks
-    }
-
-from run_validation import draw_topology_scene
 
 def evaluate_single_integration_case(base_blueprint: np.ndarray,
                                      detector:HexagonalTopologyDetector,
@@ -311,36 +174,18 @@ def evaluate_single_integration_case(base_blueprint: np.ndarray,
     mapped_labels = map_matrix_indices(result["topological_matrix"], result["labels"])
     print(mapped_labels)
 
+    gt_dict = make_blueprint_dict(base_blueprint, blueprint, generator, camera=cam_obj, R=R, t=t)
+    node_status_dict = classify_topology_nodes(gt_dict, result["topological_matrix"], result["points"], result["labels"])
+
     if save_images:
         cv2.imwrite(os.path.join(save_dir, f"synthetic_shot_{case_name}-debug.png"), img)
-        # Generate the color-coded true-positive metric diagnostic overlay
-        gt_dict, actual_dict = extended_classify_topology_nodes(
-            topological_matrix=result["topological_matrix"],
-            detected_points=result["points"],
-            detected_labels=result["labels"],
-            base_blueprint=base_blueprint,
-            modified_blueprint=blueprint,
-            generator=generator,
-            camera=cam_obj,
-            R=R, t=t,
-            max_allowed_drift_px=4.0
-        )
-        debug_overlay = draw_topology_scene(gt_dict, actual_dict, img, legend_position="bottom_left")
+        debug_overlay = draw_topology_scene(gt_dict, node_status_dict, img, legend_position="bottom_left")
         # Save the diagnostic visualization matrix directly to disk
         diagnostic_filename = f"synthetic_shot_{case_name}-diagnostic.png"
         cv2.imwrite(os.path.join(save_dir, diagnostic_filename), debug_overlay)
         print(f" -> Exported visual debug overlay to '{diagnostic_filename}'")
 
-    # 8. Process accuracy metrics against our updated visible blueprint mask
-    metrics = calculate_reconstruction_metrics(
-        topological_matrix=result["topological_matrix"],
-        detected_points=result["points"],
-        base_blueprint=base_blueprint,
-        modified_blueprint=blueprint,
-        generator=generator,
-        camera=cam_obj,
-        R=R, t=t
-    )
+    metrics = compute_topology_statistics(gt_dict, node_status_dict)
 
     metrics["status"] = "success"
     metrics["case_name"] = case_name
@@ -375,71 +220,6 @@ def compute_visible_blueprint(base_blueprint: np.ndarray,
     return visible_blueprint
 
 
-def extended_classify_topology_nodes(topological_matrix: np.ndarray,
-                                     detected_points: np.ndarray,
-                                     detected_labels: np.ndarray,
-                                     base_blueprint: np.ndarray,
-                                     modified_blueprint: np.ndarray,
-                                     generator,
-                                     camera,
-                                     R: np.ndarray, t: np.ndarray,
-                                     max_allowed_drift_px: float = None) -> tuple:
-    """
-    Adapter function that structures node configurations and shapes, invokes
-    the core spatial classifier, and enriches it with true negative erasures (tn)
-    and omissions using a claimed-key grid protection mapping layer.
-    """
-    assert max_allowed_drift_px is not None, "A valid float threshold max_allowed_drift_px must be explicitly provided."
-    from run_validation import classify_topology_nodes
-
-    H_nodes, W_nodes = base_blueprint.shape
-    gt_dict = {}
-
-    # 1. GENERATE THE IDEAL GROUND TRUTH NODE REGISTRY WITH SHAPE MATRICES
-    for r in range(H_nodes):
-        for c in range(W_nodes):
-            if base_blueprint[r, c] < 0:
-                continue
-            node_world_center = generator.get_shape_center(r, c)
-            pt = camera.project_point(node_world_center, R, t)
-            if pt is not None and camera.is_visible(pt):
-                # Maps directly to the expected core parser signature: (shape_type, x, y)
-                gt_dict[(r, c)] = (base_blueprint[r, c], pt[0], pt[1])
-
-    # 2. SEAMLESS EARLY RETURN FOR BLANK CANVAS FRAMES
-    if detected_points is None or detected_points.size == 0:
-        classifications = {}
-        for (r, c), gt_coord in gt_dict.items():
-            is_erased = (modified_blueprint[r, c] < 0)
-            classifications[(r, c)] = {
-                "type": "tn" if is_erased else "fn",
-                "dist": float('inf'),
-                "coords": (gt_coord[1], gt_coord[2]),
-                "nearest_gt": (r, c)
-            }
-        return gt_dict, classifications
-
-    # 3. GENERATE THE LIVE DETECTED INDEX REGISTRY EMBEDDING HARDWARE LABELS
-    detected_dict = {}
-    for idx in range(len(detected_points)):
-        decoded_locations = np.argwhere(topological_matrix == idx)
-        if len(decoded_locations) > 0:
-            r_dec, c_dec = int(decoded_locations[0][0]), int(decoded_locations[0][1])
-            detected_dict[(r_dec, c_dec)] = (detected_labels[idx], detected_points[idx][0], detected_points[idx][1])
-        else:
-            # Rejections are stored under integer handles to keep them isolated from matrix bounds
-            detected_dict[idx] = (detected_labels[idx], detected_points[idx][0], detected_points[idx][1])
-
-    # 4. INVOKE YOUR CORE MATHEMATICAL CLASSIFIER
-    # Natively distributes 'tp', 'fp', 'ma', and 'ghost' classes based on your geometry
-    classifications = classify_topology_nodes(
-        gt_dict,
-        detected_dict,
-        max_allowed_drift_px=max_allowed_drift_px
-    )
-    return gt_dict, classifications
-
-
 def save_test_case_markdown_report(case_name: str,
                                    case_payload: dict,
                                    metrics: dict,
@@ -463,10 +243,9 @@ def save_test_case_markdown_report(case_name: str,
     json_filename = os.path.join(output_dir, f"report_{case_name.lower()}.json")
 
     # 2. Extract operational metrics parameters safely
-    accuracy = metrics.get("accuracy", 0.0)
     tp = metrics.get("true_positives", 0)
     visible = metrics.get("total_visible_targets", 0)
-    misalignments = metrics.get("misalignments", 0)
+    misalignments = metrics.get("misalignments", 0) + metrics.get("fp", 0)
     skips = metrics.get("graph_skips", 0)
     misses = metrics.get("optical_misses", 0)
     ghosts = metrics.get("ghost_nodes", 0)
@@ -490,7 +269,7 @@ def save_test_case_markdown_report(case_name: str,
     # 4. Construct the complete Markdown layout string block
     md_content = []
     md_content.append(f"# Automated Test Verification Report: {case_name}")
-    md_content.append(f"**Execution Status:** {status_indicator} | **Final Decoding Accuracy:** {accuracy:.2f}%\n")
+    md_content.append(f"**Execution Status:** {status_indicator} | **Final Matching Precision:** {metrics['precision']:.2f}%\n")
 
     md_content.append("## Scenario Description")
     md_content.append(f"{description}\n")
@@ -505,15 +284,13 @@ def save_test_case_markdown_report(case_name: str,
     md_content.append(
         f"| **Index Alignment Drift (Misalignments)** | {misalignments} | Decoded matrix row/column cells that shifted away from ground-truth slots. |")
     md_content.append(
-        f"| **Graph Traversal Skips (Slips)** | {skips} | Geometric blobs extracted from video frames but skipped by wave-growth engine. |")
+        f"| **Graph Traversal Skips** | {skips} | Geometric blobs extracted from video frames but skipped by wave-growth engine. |")
     md_content.append(
         f"| **Pure Optical Misses** | {misses} | Core blueprint dots inside view limits that failed the thresholding blob detector. |")
     md_content.append(
-        f"| **Noise Artifacts (Ghosts)** | {ghosts} | Spurious noise blobs registered by camera that do not exist on the master template. |")
+        f"| **Noise Artifacts (Ghosts)** | {ghosts + leaks} | Spurious noise blobs registered by camera that do not exist on the master template. |")
     md_content.append(
-        f"| **Expected Erasures (True Negatives)** | {erasures} | Hardware-level missing spots or mask holes correctly bypassed by the tracker. |")
-    md_content.append(
-        f"| **Erasure Glare Leaks** | {leaks} | Noise spots inside erasure zones that mistakenly triggered feature detections. |")
+        f"| **Expected Erasures (True Negatives)** | {erasures - leaks} | Hardware-level missing spots or mask holes correctly bypassed by the tracker. |")
     md_content.append("")
 
     md_content.append("## Camera Simulation Extrinsics & Position Parameters")
@@ -557,7 +334,7 @@ def save_summary_markdown_report(results_dict: dict,
                               the complete metrics configuration dictionary directly:
                               {
                                 "CLEAN_BASELINE": {
-                                    "description": "Prinstine tracking run",
+                                    "description": "tracking run",
                                     "accuracy": 100.0,
                                     "true_positives": 841,
                                     ...
@@ -574,8 +351,8 @@ def save_summary_markdown_report(results_dict: dict,
     md_content = []
     md_content.append("# Pattern Registration Performance Summary")
 
-    md_content.append("| Case Name | Scenario Comment Description | Visible Targets | Recall | Precision | Accuracy| Status |")
-    md_content.append("| :--- | :--- | :---: | :---: | :---: | :---: | :---: |")
+    md_content.append("| Case Name | Scenario Comment Description | Visible Targets | Recall | Precision | Status |")
+    md_content.append("| :--- | :--- | :---: | :---: | :---: | :---: |")
 
     total_cases = len(results_dict)
     passed_cases = 0
@@ -585,20 +362,9 @@ def save_summary_markdown_report(results_dict: dict,
         # Dynamically extract description straight from the metrics array dictionary
         comment = metrics.get("description", "No description profile recorded.")
 
-        # Isolate parameters needed for standard statistical calculations
-        tp = metrics.get("true_positives", 0)
         visible = metrics.get("total_visible_targets", 0)
-        misalignments = metrics.get("misalignments", 0)
-        ghosts = metrics.get("ghost_nodes", 0)
-        accuracy = metrics.get("accuracy", 0.0)
-
-        # 3. Compute mathematically precise Recall and Precision ratios
-        # Recall: How many of the visible blueprint dots did the decoder capture?
-        recall = (tp / visible) * 100.0 if visible > 0 else 0.0
-
-        # Precision: Out of all nodes written to canvas, how many are correct?
-        total_extracted = tp + misalignments + ghosts
-        precision = (tp / total_extracted) * 100.0 if total_extracted > 0 else 0.0
+        recall = metrics.get("recall", 0)
+        precision = metrics.get("precision", 0)
 
         # Evaluate status threshold signatures
         is_passed = metrics.get("is_passed", False)
@@ -609,8 +375,9 @@ def save_summary_markdown_report(results_dict: dict,
 
         # Append row format block string data line directly
         md_content.append(
-            f"| **{case_name}** | {comment} | {visible} | {recall:.2f}% | {precision:.2f}% | {accuracy:.2f}% | {status_tag} |"
+            f"| **{case_name}** | {comment} | {visible} | {recall:.2f}% | {precision:.2f}% | {status_tag} |"
         )
+
 
     # 4. Append high-level global system telemetry metrics
     md_content.append("\n## System Conformance Evaluation Analytics")
@@ -621,12 +388,8 @@ def save_summary_markdown_report(results_dict: dict,
     md_content.append("1. **Recall Index:** Evaluates the target search coverage ratio relative to the active image pane boundary layout.")
     md_content.append("   $$\\text{Recall} = \\frac{TP}{\\text{Visible GT Nodes}} \\times 100.0$$")
     md_content.append("2. **Precision Index:** Quantifies the structural assignment reliability of the topological decoder, demonstrating its zero false-positive extraction rate.")
-    md_content.append("   $$\\text{Precision} = \\frac{TP}{TP + \\text{Misalignments} + \\text{Ghosts}} \\times 100.0$$")
-    md_content.append("3. **System Accuracy Score:** Tracks the combined performance of the hardware mask validator and the wave-growth graph. Evaluates true classification steps over the detected array domain while remaining completely immune to unmodeled optical sensor visibility omissions ($FN$).")
-    md_content.append("   $$\\text{Accuracy} = \\frac{TP + (\\text{Expected Erasures} - \\text{Erasure Leaks})}{\\text{Total Detected} + \\text{Expected Erasures}} \\times 100.0$$")
-    md_content.append("A test suite run is explicitly designated as **PASSED** if and only if it simultaneously satisfies both strict topological and numerical performance thresholds:")
-    md_content.append("- **Zero Topological Defects:** `misalignments = 0` (Zero tolerance for index drift or island mis-assembly).")
-    md_content.append("- **High Classification Fidelity:** `accuracy_score > 90.0%` (Sub-pixel tracking confidence minimum baseline).")
+    md_content.append("   $$\\text{Precision} = \\frac{TP}{TP + \\text{Misalignments}} \\times 100.0$$")
+    md_content.append(f"A test suite run is explicitly designated as **PASSED** if metching precision threshold is reached: `precision > {get_precision_threshold():.1f}%`")
 
     if total_cases > 0:
         yield_score = (passed_cases / total_cases) * 100.0
@@ -744,7 +507,7 @@ if __name__ == "__main__":
     camera_io.save_dict_as_json(os.path.join(RESULT_DIR,"base_camera.json"), INTRINSICS)
 
     for case_name, case_payload in cases.items():
-        #if  case_name != "severe_pitch_tilt_45deg":
+        #if case_name != "extreme_stress":
         #    continue
         print(f"\n[EVALUATING]: Case Module [{case_name.upper()}]")
 
@@ -771,7 +534,7 @@ if __name__ == "__main__":
         if result["status"] != "success":
             print(f" -> [WARNING] Decoder failed.")
             continue
-        print(f" -> Metrics: accuracy={result['accuracy']:.2f}%, True Positives={result['true_positives']} from total visible {result['total_visible_targets']}")
+        print(f" -> Metrics: precision={result['precision']:.2f}%, True Positives={result['true_positives']} from total visible {result['total_visible_targets']}")
 
     summary_filename = save_summary_markdown_report(results_dict=accumulated_metrics_dictionary, output_dir=RESULT_DIR)
     if len(summary_filename) > 0:

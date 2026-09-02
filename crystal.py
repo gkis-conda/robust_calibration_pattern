@@ -1,17 +1,132 @@
 import numpy as np
-from scipy.spatial import Delaunay, KDTree
+from scipy.spatial import Delaunay, cKDTree
 from collections import deque
 from lattice_topology import *
 
 
-def suppress_overlapping_triangles(triangles, points, suppression_radius):
+class LocalScaleObserver:
     """
-    Applies Spatial Non-Maximum Suppression (NMS) to a list of triangles.
+    Filter based on
+    Statistics of inscribed radiuses of Delaunay triangles,
+    The main idea that local radiused are invariant and correlated under distortion
+    """
+    def __init__(self, max_edge_threshold: float, img_width_span: tuple, img_height_span: tuple, rows: int = 5,
+                 cols: int = 5):
+        """
+        Efficient O(1) running average grid cache tracking local baseline scales
+        across partitioned canvas regions using scale-invariant inradius ratio metrics.
+        """
+        self.rows = rows
+        self.cols = cols
+        self.min_x = img_width_span[0]
+        self.min_y = img_height_span[0]
+
+        max_x = img_width_span[1]
+        max_y = img_height_span[1]
+
+        self.cell_w = (max_x - self.min_x) / cols
+        self.cell_h = (max_y - self.min_y) / rows
+
+        self.global_fallback = 0.
+        self.global_n = 0.
+        self.max_edge_threshold = max_edge_threshold
+
+        self.grid_means = np.zeros((rows, cols), dtype=float)
+        self.grid_counts = np.zeros((rows, cols), dtype=int)
+
+    def _get_cell_indices(self, x: float, y: float) -> tuple:
+        """Maps continuous pixel coordinates into discrete macro-cell slots via fast integer division."""
+        r = int(np.clip((y - self.min_y) // self.cell_h, 0, self.rows - 1))
+        c = int(np.clip((x - self.min_x) // self.cell_w, 0, self.cols - 1))
+        return r, c
+
+    def _compute_triangle_inradius(self, p_a, p_b, p_c) -> float:
+        """Computes the exact isotropic radius of the inscribed circle for a triplet of points."""
+        a = float(np.linalg.norm(p_b - p_c))
+        b = float(np.linalg.norm(p_a - p_c))
+        c = float(np.linalg.norm(p_a - p_b))
+        # filter out external triangles on convex hull
+        if a > self.max_edge_threshold or b > self.max_edge_threshold or c > self.max_edge_threshold:
+            return 0.0
+
+        s = (a + b + c)
+        if s < 1.0:
+            return 0.0
+
+        area = abs(p_a[0] * (p_b[1] - p_c[1]) + p_b[0] * (p_c[1] - p_a[1]) + p_c[0] * (p_a[1] - p_b[1]))
+        return area / s
+
+    def append(self, p_a, p_b, p_c):
+        inradius = self._compute_triangle_inradius(p_a, p_b, p_c)
+        if inradius <= 0.0:
+            return
+
+        barycenter = (p_a + p_b + p_c) / 3.0
+        r, c = self._get_cell_indices(barycenter[0], barycenter[1])
+
+        self.grid_counts[r, c] += 1
+        self.grid_means[r, c] += (inradius - self.grid_means[r, c]) / self.grid_counts[r, c]
+
+        self.global_n += 1
+        self.global_fallback += (inradius - self.global_fallback) / self.global_n
+
+    def _get_local_scale(self, x: float, y: float) -> float:
+        """Retrieves the cell's running average or instantly returns the global fallback if unpopulated."""
+        r, c = self._get_cell_indices(x, y)
+        return float(self.grid_means[r, c])
+
+    def get_local_similarity(self, p_a, p_b, p_c) -> float:
+        """
+        Computes the scale-invariant ratio deviation score for a candidate triangle.
+        Returns 0.0 for a perfect scale match.
+        """
+        inradius = self._compute_triangle_inradius(p_a, p_b, p_c)
+        if inradius <= 0.0:
+            return 999.0  # Massive penalty for degenerate triangles
+
+        barycenter = (p_a + p_b + p_c) / 3.0
+        local_scale = self._get_local_scale(barycenter[0], barycenter[1])
+
+        if local_scale <= 0.0:
+            return 999.0
+
+        # Evaluates structural symmetry regardless of whether cell expands or contracts
+        ratio = max(inradius / local_scale, local_scale / inradius)
+        return float(ratio - 1.0)
+
+    def __call__(self, p_a, p_b, p_c) -> float:
+        """Enables the instance to be used directly as a callable score estimator function."""
+        return self.get_local_similarity(p_a, p_b, p_c)
+
+
+def regularity_score(p_a, p_b, p_c):
+
+    dist_c = float(np.linalg.norm(p_a - p_b))
+    dist_a = float(np.linalg.norm(p_b - p_c))
+    dist_b = float(np.linalg.norm(p_c - p_a))
+    try:
+        cos_A = (dist_b ** 2 + dist_c ** 2 - dist_a ** 2) / (2.0 * dist_b * dist_c)
+        cos_B = (dist_a ** 2 + dist_c ** 2 - dist_b ** 2) / (2.0 * dist_a * dist_c)
+        cos_C = (dist_a ** 2 + dist_b ** 2 - dist_c ** 2) / (2.0 * dist_a * dist_b)
+
+        angles_deg = np.degrees(np.arccos(np.clip([cos_A, cos_B, cos_C], -1.0, 1.0)))
+        # Compute a scalar float deviation score (lower score = more equilateral)
+        beauty_score = float(np.sum(np.abs(angles_deg - 60.0)) / 3.0)
+    except ZeroDivisionError:
+        beauty_score = 999.0  # Assign a bad score penalty to malformed degenerate rows
+    return beauty_score
+
+
+def nonmax_suppression(triangles, points, suppression_radius, score_estimator):
+    """
+    Applies Spatial Non-Maximum Suppression (NMS) to a list of triangles,
+    sorting the processing queue based on localized cell scale similarity.
 
     Parameters:
         triangles (list): List of index triplets [[idx_a, idx_b, idx_c], ...]
         points (np.array): NumPy array of physical point coordinates
-        suppression_radius (float): Minimum physical distance between face centers.
+        suppression_radius (float): Minimum physical distance between face centers
+        score_estimator: score estimator for triangles 0 - is best one
 
     Returns:
         list: Sorted index triplets of uniform non-overlapping triangles.
@@ -21,40 +136,28 @@ def suppress_overlapping_triangles(triangles, points, suppression_radius):
 
     candidates_pool = []
 
+    # PASS 1: EXTRACT SPATIAL SCORES RELATIVE TO THE LOCALIZED SCALE GRID
     for simplex in triangles:
         idx_a, idx_b, idx_c = simplex
         p_a, p_b, p_c = points[idx_a], points[idx_b], points[idx_c]
 
-        # 1. Compute exact physical centroid coordinates
+        # Compute accurate centroid for spatial suppression lookups
         centroid = (p_a + p_b + p_c) / 3.0
-        centroid_x = float(centroid[0])
-        centroid_y = float(centroid[1])
 
-        # 2. Calculate edge lengths to resolve interior angles
-        dist_c = float(np.linalg.norm(p_a - p_b))
-        dist_a = float(np.linalg.norm(p_b - p_c))
-        dist_b = float(np.linalg.norm(p_c - p_a))
-
-        try:
-            cos_A = (dist_b ** 2 + dist_c ** 2 - dist_a ** 2) / (2.0 * dist_b * dist_c)
-            cos_B = (dist_a ** 2 + dist_c ** 2 - dist_b ** 2) / (2.0 * dist_a * dist_c)
-            cos_C = (dist_a ** 2 + dist_b ** 2 - dist_c ** 2) / (2.0 * dist_a * dist_b)
-
-            angles_deg = np.degrees(np.arccos(np.clip([cos_A, cos_B, cos_C], -1.0, 1.0)))
-            # Compute a scalar float deviation score (lower score = more equilateral)
-            beauty_score = float(np.sum(np.abs(angles_deg - 60.0)) / 3.0)
-        except ZeroDivisionError:
-            beauty_score = 999.0  # Assign a bad score penalty to malformed degenerate rows
+        # Query the observer for the local scale deviation metrics
+        similarity_score = score_estimator(p_a, p_b, p_c)
 
         candidates_pool.append({
             'simplex': simplex,
-            'centroid': (centroid_x, centroid_y),
-            'score': beauty_score
+            'centroid': centroid,
+            'score': similarity_score
         })
 
-    # Sort candidates so the most regular equilateral triangles are processed first
+    # Sort the pool: candidates matching their localized grid quadrant step
+    # perfectly are placed directly at the front of the NMS suppression queue
     candidates_pool.sort(key=lambda item: item['score'])
 
+    # PASS 2: CONVEX HULL EXCLUSION AND CENTROID FILTERING
     final_selected_triangles = []
     for cand in candidates_pool:
         c_x, c_y = cand['centroid']
@@ -71,11 +174,8 @@ def suppress_overlapping_triangles(triangles, points, suppression_radius):
         if keep_triangle:
             final_selected_triangles.append(cand)
 
-    # Collect the surviving clean index triplets
-    output_simplices = []
-    for item in final_selected_triangles:
-        output_simplices.append(item['simplex'])
-
+    # Harvest surviving clean first-order index triplets
+    output_simplices = [item['simplex'] for item in final_selected_triangles]
     return output_simplices
 
 
@@ -85,15 +185,17 @@ class GridCrystalGrower:
     Extracts valid geometric-topological islands one by one and 
     directly generates dense integer point lookup index matrices.
     """
-    def __init__(self, detected_points, wave_limit = 1000):
+    def __init__(self, detected_points, wave_limit = 1000, debug_output = False):
         self.points = np.array(detected_points, dtype=np.float64)
         num_points = len(self.points)
-        self.kdtree = KDTree(self.points) if num_points > 0 else None
+        self.kdtree = cKDTree(self.points) if num_points > 0 else None
         self.dsu = IslandDSU(num_points) if num_points > 0 else None
         self.triangulation = Delaunay(self.points)
         simplices = self.triangulation.simplices
-        self.debug_output = False
+        if len(simplices) == 0:
+            raise ValueError("[-] Error: No valid Delaunay edges generated.")
 
+        self.debug_output = debug_output
         # Calculate global median step across all triangulation edges
         all_dists = []
         for simplex in simplices:
@@ -103,15 +205,15 @@ class GridCrystalGrower:
             all_dists.append(float(np.linalg.norm(p_b - p_c)))
             all_dists.append(float(np.linalg.norm(p_c - p_a)))
 
-        # CRITICAL PROTECTION: Fast-exit if triangulation has zero edges
-        if len(all_dists) == 0:
-            raise ValueError("[-] Error: No valid Delaunay edges generated. Cloud might be collinear.")
-
+        all_dists = np.array(all_dists, dtype=float)
         self.step = float(np.median(all_dists))
-        print(f"[Diag] Global reference step from all edges: {self.step:.2f} px")
+        mad = np.median(np.abs(all_dists - self.step))
+        self.max_edge_threshold = self.step + 3.0 * mad + 0.5
+        if self.debug_output:
+            print(f"[Diag] Reference step from all edges: {self.step:.2f} px; max edge: {self.max_edge_threshold:.2f}")
 
         self.MAX_DIAGNOSTIC_WAVE_LIMIT = wave_limit
-        
+
         # Global registries mapping master_root_id -> dictionary maps
         # Keeps absolute tracking state unified across multiple sequential waves
         self.global_grids = {}  # master_root_id -> {(u, v): point_idx}
@@ -130,12 +232,11 @@ class GridCrystalGrower:
 
         discovered_triangles = []
 
-        # Strict constraints tailored for ideal triangular grid pattern calibration
-        MIN_ALLOWED_ANGLE_DEG = 48.0
-        MAX_ALLOWED_ANGLE_DEG = 72.0
+        img_width_span = (self.kdtree.mins[0] * 0.9, self.kdtree.maxes[0] * 1.1)
+        img_height_span = (self.kdtree.mins[1] * 0.9, self.kdtree.maxes[1] * 1.1)
 
-        max_allowed_dist = self.step * 1.60
-        min_allowed_dist = self.step * 0.60
+        score = LocalScaleObserver(self.max_edge_threshold,
+            img_width_span=img_width_span, img_height_span=img_height_span, rows=5, cols=7)
 
         total_faces = len(simplices)
         fail_dist = 0
@@ -144,30 +245,15 @@ class GridCrystalGrower:
         for simplex in simplices:
             idx_a, idx_b, idx_c = simplex
             p_a, p_b, p_c = self.points[idx_a], self.points[idx_b], self.points[idx_c]
-
-            dist_c = float(np.linalg.norm(p_a - p_b))
-            dist_a = float(np.linalg.norm(p_b - p_c))
-            dist_b = float(np.linalg.norm(p_c - p_a))
-
-            # Filter 1: Edge Length Boundaries
-            if not (min_allowed_dist <= dist_a <= max_allowed_dist and
-                    min_allowed_dist <= dist_b <= max_allowed_dist and
-                    min_allowed_dist <= dist_c <= max_allowed_dist):
+            score.append(p_a, p_b, p_c)
+        if self.debug_output:
+            print("[DIAG] scaler:\n", score.grid_means)
+        deviation_score = 0.2
+        for simplex in simplices:
+            idx_a, idx_b, idx_c = simplex
+            p_a, p_b, p_c = self.points[idx_a], self.points[idx_b], self.points[idx_c]
+            if score(p_a, p_b, p_c) > deviation_score:
                 fail_dist += 1
-                continue
-
-            # Filter 2: Internal Angles
-            try:
-                cos_A = (dist_b ** 2 + dist_c ** 2 - dist_a ** 2) / (2.0 * dist_b * dist_c)
-                cos_B = (dist_a ** 2 + dist_c ** 2 - dist_b ** 2) / (2.0 * dist_a * dist_c)
-                cos_C = (dist_a ** 2 + dist_b ** 2 - dist_c ** 2) / (2.0 * dist_a * dist_b)
-
-                angles_deg = np.degrees(np.arccos(np.clip([cos_A, cos_B, cos_C], -1.0, 1.0)))
-                if np.any(angles_deg < MIN_ALLOWED_ANGLE_DEG) or np.any(angles_deg > MAX_ALLOWED_ANGLE_DEG):
-                    fail_angle += 1
-                    continue
-            except ZeroDivisionError:
-                fail_angle += 1
                 continue
 
             # Enforce strict Counter-Clockwise (CCW) winding order safely
@@ -176,16 +262,18 @@ class GridCrystalGrower:
             if np.cross(vec_ab, vec_ac) < 0.0:
                 idx_b, idx_c = idx_c, idx_b
 
-            discovered_triangles.append([int(idx_a), int(idx_b), int(idx_c)])
+            discovered_triangles.append([idx_a, idx_b, idx_c])
         if self.debug_output:
             print(f"[Diag] Total Delaunay faces: {total_faces}")
             print(f"[Diag] Drop by edge length:  {fail_dist}")
             print(f"[Diag] Drop by angle check: {fail_angle}")
             print(f"[Diag] Validated geometric seeds left: {len(discovered_triangles)}")
 
+        discovered_triangles = nonmax_suppression(discovered_triangles,
+                self.points, self.max_edge_threshold * 3, score_estimator=score)
         return discovered_triangles
 
-    def _find_reflection_candidate(self, v_pivot, v_b, v_c, distance_tolerance=0.2):
+    def _find_reflection_candidate(self, v_pivot, v_b, v_c, distance_tolerance=0.1):
         """
         Predicts the physical position of the reflected vertex A' = B + C - A,
         searches the spatial neighborhood via KDTree, performs a backward 
@@ -195,38 +283,58 @@ class GridCrystalGrower:
         p_pivot = self.points[v_pivot]
         p_b = self.points[v_b]
         p_c = self.points[v_c]
-        
-        # Physical prediction: A' = B + C - A
+
+        # Calculate the ideal position using the vector lattice addition: A' = B + C - Pivot
         p_a_prim = p_b + p_c - p_pivot
-        
         search_radius = self.step * distance_tolerance
-        dist, hit_idx = self.kdtree.query(p_a_prim, k=1, eps=0, p=2, distance_upper_bound=search_radius)
-                            
-        if dist > search_radius:
+
+        # Query the two closest candidates simultaneously to evaluate spatial uniqueness
+        dists, hit_indices = self.kdtree.query(
+            p_a_prim, k=2, eps=0, p=2, distance_upper_bound=search_radius
+        )
+
+        # Immediate termination if zero features reside within the search boundary limits
+        if dists[0] == float('inf'):
             return None
-            
+
+        # 1. Lowe check
+        LOWE_RATIO_THRESHOLD = 0.9
+        # Enforce Lowe's ratio constraint if a secondary neighbor is within the search window
+        # Values between 0.70 and 0.80 shield tightly compressed edge horizons from line-jumping
+        if dists[1] != float('inf'):
+            if dists[0] * LOWE_RATIO_THRESHOLD < dists[1]:
+                return None  # Rejects ambiguous or aliased duplicate match traps
+
+        # Extract the verified node assignment and its physical pixel coordinates
+        hit_idx = hit_indices[0]
         p_new = self.points[hit_idx]
-        
-        # --- BACKWARD PARALLELOGRAM CONDITION CHECK ---
-        err_b = float(np.linalg.norm((p_new - p_b) - (p_c - p_pivot)))
-        err_c = float(np.linalg.norm((p_new - p_c) - (p_b - p_pivot)))
-        if err_b > (self.step * distance_tolerance) or err_c > (self.step * distance_tolerance):
-            return None  # Rejects distorted perspective outliers
 
-        # --- MANDATORY GEOMETRIC CCW INVARIANT CHECK ---
-        # Compute 2D vectors: edge_1 = B - New, edge_2 = C - New
-        vec_1 = p_b - p_new
-        vec_2 = p_c - p_new
-
+        # 2. Protect from inside search for extremely distorted cases
+        v = p_b - p_new
+        u = p_c - p_new
         # Compute the scalar cross product (Z-component)
-        cross_product = vec_1[0] * vec_2[1] - vec_1[1] * vec_2[0]
-
+        cross_product = v[0] * u[1] - v[1] * u[0]
+        MIN_AREA_PX2 = 5 # minimal area of the parallelogram in square pixels
         # Strict Invariant Shield: If cross product is negative, the triangle
         # is flipped/inverted (growing backwards into the island). Reject it immediately!
-        if cross_product < 0:
-            return hit_idx
-            
-        return None
+        if cross_product > -MIN_AREA_PX2:
+            return None
+
+        # 3. Parallelogram check
+        side_b_base = p_b - p_pivot
+        side_b_opp = p_new - p_c
+        err_b = np.linalg.norm(side_b_opp - side_b_base)
+        len_b_base = np.linalg.norm(side_b_base)
+        if err_b > len_b_base * distance_tolerance:
+            return None
+
+        side_c_base = p_c - p_pivot
+        side_c_opp = p_new - p_b
+        err_c = float(np.linalg.norm(side_c_opp - side_c_base))
+        len_c_base = np.linalg.norm(side_c_base)
+        if err_c > len_c_base * distance_tolerance:
+            return None
+        return hit_idx
 
     def _check_coordinate_collision(self, best_match_idx, k_new, local_grid):
         """
@@ -367,7 +475,7 @@ class GridCrystalGrower:
                 if hit_island_size >= 3:
                      if self._execute_island_fusion_merge(
                          current_root, hit_island_root, v_b, v_c, best_match_idx) is None:
-                         continue
+                            continue
                 # --- CASE C: SINGLE POINT ABSORPTION ---
                 elif hit_island_size == 1:
                      new_root, old_root = self.dsu.merge(current_root, best_match_idx)
@@ -392,7 +500,7 @@ class GridCrystalGrower:
         return next_queue
 
 
-    def grow_island_lattice(self, unvisited_indices=None, distance_tolerance_ratio=0.35):
+    def grow_island_lattice(self):
         """
         Relies entirely on find_all_valid_triangles for seeding.
         Tracks expansion solely via visited topological faces rather than blocking points.
@@ -405,16 +513,15 @@ class GridCrystalGrower:
         # Extract the pure, pre-filtered topological face arrays from your Delaunay layer
         # Pass all points to let it discover everything available
         full_pool = set(range(points_num))
-        all_triangles = self.find_all_valid_triangles(full_pool)
-        if not all_triangles:
+        triangles = self.find_all_valid_triangles(full_pool)
+        if not triangles:
             return output_matrices
-        triangles =  suppress_overlapping_triangles(all_triangles, self.points, 5 * self.step)
 
         self.global_grids = {}
         queue = deque()
         # Track globally processed triangle faces to prevent redundant seed generation
         self.globally_processed_faces = set()
-	    # Prepare initial graph
+        # Prepare initial graph
         for seed_face in triangles:
             v0, v1, v2 = seed_face
             if self.dsu.get_size(v0) > 1 or self.dsu.get_size(v1) > 1 or self.dsu.get_size(v2)>  1:
@@ -469,7 +576,7 @@ class GridCrystalGrower:
         return output_matrices
 
 
-def reconstruct_mesh(detected_points, point_labels, m_seq_length=7, distance_tolerance_ratio=0.30):
+def reconstruct_mesh(detected_points, point_labels, m_seq_length=7):
     """
     Executes multi-island barycentric crystal growth and reformats each independent 
     topological island structure into its own isolated dense 2D index matrix.
@@ -478,10 +585,9 @@ def reconstruct_mesh(detected_points, point_labels, m_seq_length=7, distance_tol
     if num_pts < int(m_seq_length):
         return []
 
-    unvisited_indices = set(range(num_pts))
     grower = GridCrystalGrower(detected_points)
     
-    islands_dict = grower.grow_island_lattice(unvisited_indices)
+    islands_dict = grower.grow_island_lattice()
     if not islands_dict:
         print("[-] Failure localized at grow_island_lattice. Wave phase failed to propagate.")
     else:
@@ -499,8 +605,6 @@ def reconstruct_mesh(detected_points, point_labels, m_seq_length=7, distance_tol
     return matrices_list
 
 
-
-# --- L1
 def test_decomposed_coordinate_collision():
     """
     Test 1: Validates _check_coordinate_collision grid properties.
@@ -513,7 +617,7 @@ def test_decomposed_coordinate_collision():
         [117.5, 130.3],  # Node 2: Frontier Edge Node C
         [152.5, 130.3],  # Node 3: Cross-over intersection target point A'
         [187.5, 130.3],  # Node 4: Slave Node (Extrapolated continuation of Ray B)
-        [170.0, 160.6]  # Node 5: Slave Node
+        [170.0, 160.6]   # Node 5: Slave Node
     ]
     grower_instance = GridCrystalGrower(mock_pts)
 
@@ -538,6 +642,7 @@ def test_decomposed_coordinate_collision():
     is_invalid = grower_instance._check_coordinate_collision(99, (1, 0), mock_local_grid)
     assert is_invalid, "Failed to trap a spatial collision on an already occupied coordinate slot."
     print("   [+] Spatial structural overlapping caught successfully.")
+
 
 def test_atomic_absorption_coordinate_accuracy():
     """
