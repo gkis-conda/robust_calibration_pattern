@@ -417,7 +417,7 @@ if __name__ == "__main__":
     IMG_SHAPE = (1920, 1080)
     K1 = -0.25
     INTRINSICS = {"fx": 1150.0, "fy": 1150.0, "cx": IMG_SHAPE[0]/2, "cy": IMG_SHAPE[1]/2, "k1": K1, "img_shape": IMG_SHAPE}
-    base_blueprint = pattern_blueprint(args.engine, cols=W_NODES, rows=H_NODES, debug_output=args.verbose)
+    base_blueprint = pattern_blueprint(args.engine, cols=W_NODES, rows=H_NODES)
     # Define your centralized parametric evaluation dictionary matrix block
     cases = {
         "clean_baseline": {
