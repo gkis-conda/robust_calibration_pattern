@@ -29,61 +29,9 @@ More detailed descriptions of the underlying algorithms and result samples can b
 
 ---
 
-## System Visualizations & Performance
-
-### 1. Real-Time Lattice Sub-Graph Front Propagation & Syndrome Decoding Traces
-Use the `--verbose` flag to collect and display low-level debugging telemetry streams during execution.
-During front-propagation execution, the wave-growth sub-graph engine (`crystal.py`) outputs a real-time, text-based matrix trace directly to the terminal console at every consecutive wave ring iteration step. This allows developers to inspect the exact state of the DSU seed expansion:
-
-```text
-   -> Island 364 Shape: (2, 3)
-[[ -1 364 402]
- [351 391 432]]
-   -> Island 834 Shape: (4, 3)
-[[ -1  -1  -1]
- [ -1 840  -1]
- [ -1 834 856]
- [828 849  -1]]
-[Diag] Wave step complete: Added 305 structural ears.
-
-Wave 2
-   -> Island 279 Shape: (5, 4)
-[[ -1  -1  -1  -1]
- [288 314 342  -1]
- [254 279 304 331]
- [245 269 294  -1]
- [ -1 237 260  -1]]
-```
-
-Also, decoding info for every extracted patch is collected as follows:
-
-```text
-row: 19, col 5, length: 13
-valid_mask: [1 1 1 1 1 1 1 1 1 1 0]
-patch:
- [[ 0  1  0  0  1  1  1  1  0  1  1  1  0]
- [ 1  0  0  1  1  1  1  1  0  0  1 -1  1]]
-Hor:  {'origin_stream_phase': 4, 'recovered_sequence': [0, 0, 0, 0, 1, 1, 1, 0, 0, 1, 1], 'errors_corrected': [4, 5], 'missing_gaps': [10], 'status': 'Corrected bit flip at index [4, 5] via syndrome projection', 'direction_key': 'W_forward'}
-Vert:  {'origin_stream_phase': 17, 'recovered_sequence': [0, 1, 1, 1, 0, 0, 0, 1, 0, 1, 0, 1], 'errors_corrected': [7, 8], 'missing_gaps': [10, 11], 'status': 'Corrected bit flip at index [7, 8] via syndrome projection', 'direction_key': 'V_reverse'}
-[Warning] Consistency check failed. Skip
-```
-
- * To review a complete, full-frame runtime console extraction log, see [**`compound_rotation_7_0025_full_log.txt`**](./docs/samples/compound_rotation_7_0025_full_log.txt), which tracks localized topological cell alignments, matrix patch outputs, and error-corrected phase outputs for the "compound_rotation_7_0025.png" image created by blender script.
-
-
-### 2. High-Fidelity Parametric Stress Benchmarks & Tracking Results
-Each synthetic stress configuration on our verification bench is paired with an automated tracking confirmation diagnostic plot (`*-diagnostic.png`). These overlays demonstrate the sub-pixel lattice extraction, node classifications, and 1D Galois Field sequence matching achieved by the wave decoder:
-
-* **Pristine Reference Alignment:** [`synthetic_shot_clean_baseline.png`](./docs/samples/synthetic_shot_clean_baseline.png) $\to$ [Visual Tracking Output Overlay](./docs/samples/synthetic_shot_clean_baseline-diagnostic.png)
-* **Severe 45-Degree Pitch Tilt Target:** [`synthetic_shot_severe_pitch_tilt_45deg.png`](./docs/samples/synthetic_shot_severe_pitch_tilt_45deg.png) $\to$ [Visual Tracking Output Overlay](./docs/samples/synthetic_shot_severe_pitch_tilt_45deg-diagnostic.png)
-* **10% Random Recognition Dropouts Configuration:** [`synthetic_shot_erasures.png`](./docs/samples/synthetic_shot_erasures.png) $\to$ [Visual Tracking Output Overlay](./docs/samples/synthetic_shot_erasures-diagnostic.png)
-* **Combined Multi-Fault Extreme Stress Frame:** [`synthetic_shot_extreme_stress.png`](./docs/samples/synthetic_shot_extreme_stress.png) $\to$ [Visual Tracking Output Overlay](./docs/samples/synthetic_shot_extreme_stress-diagnostic.png)
-
-Test cases can be easily extended by editing camera intrinsics/extrinsics and running the automated code generation utilities to export paired diagnostic files.
-
----
-
 ## Repository Script Directory
+
+The calibration engine is implemented as a suite of command-line Python scripts. The codebase is fully compatible and tested with Python 3.6+.
 
 ### 1. Core Architecture Modules
 * `m_sequence.py`: Manages the 5th-order binary LFSR primitive polynomial math loops over $GF(2)$ and generates the master cyclic tracking sequences.
@@ -142,6 +90,60 @@ Diagnostic rendering layout example: [debug tool visualization](./docs/samples/c
 This tool automatically compiles and serializes a performance tracking and pattern matching statistics report. Review a complete runtime evaluation sheet in [summary.md](./docs/samples/summary.md). Note: The extra `--` separator is a standard constraint required to separate Blender's native CLI arguments from custom Python script flags.
 
 ---
+## System Visualizations & Performance
+
+### 1. Real-Time Lattice Sub-Graph Front Propagation & Syndrome Decoding Traces
+Use the `--verbose` flag to collect and display low-level debugging telemetry streams during execution.
+During front-propagation execution, the wave-growth sub-graph engine (`crystal.py`) outputs a real-time, text-based matrix trace directly to the terminal console at every consecutive wave ring iteration step. This allows developers to inspect the exact state of the DSU seed expansion:
+
+```text
+   -> Island 364 Shape: (2, 3)
+[[ -1 364 402]
+ [351 391 432]]
+   -> Island 834 Shape: (4, 3)
+[[ -1  -1  -1]
+ [ -1 840  -1]
+ [ -1 834 856]
+ [828 849  -1]]
+[Diag] Wave step complete: Added 305 structural ears.
+
+Wave 2
+   -> Island 279 Shape: (5, 4)
+[[ -1  -1  -1  -1]
+ [288 314 342  -1]
+ [254 279 304 331]
+ [245 269 294  -1]
+ [ -1 237 260  -1]]
+```
+
+Also, decoding info for every extracted patch is collected as follows:
+
+```text
+row: 19, col 5, length: 13
+valid_mask: [1 1 1 1 1 1 1 1 1 1 0]
+patch:
+ [[ 0  1  0  0  1  1  1  1  0  1  1  1  0]
+ [ 1  0  0  1  1  1  1  1  0  0  1 -1  1]]
+Hor:  {'origin_stream_phase': 4, 'recovered_sequence': [0, 0, 0, 0, 1, 1, 1, 0, 0, 1, 1], 'errors_corrected': [4, 5], 'missing_gaps': [10], 'status': 'Corrected bit flip at index [4, 5] via syndrome projection', 'direction_key': 'W_forward'}
+Vert:  {'origin_stream_phase': 17, 'recovered_sequence': [0, 1, 1, 1, 0, 0, 0, 1, 0, 1, 0, 1], 'errors_corrected': [7, 8], 'missing_gaps': [10, 11], 'status': 'Corrected bit flip at index [7, 8] via syndrome projection', 'direction_key': 'V_reverse'}
+[Warning] Consistency check failed. Skip
+```
+
+ * To review a complete, full-frame runtime console extraction log, see [**`compound_rotation_7_0025_full_log.txt`**](./docs/samples/compound_rotation_7_0025_full_log.txt), which tracks localized topological cell alignments, matrix patch outputs, and error-corrected phase outputs for the "compound_rotation_7_0025.png" image created by blender script.
+
+
+### 2. High-Fidelity Parametric Stress Benchmarks & Tracking Results
+Each synthetic stress configuration on our verification bench is paired with an automated tracking confirmation diagnostic plot (`*-diagnostic.png`). These overlays demonstrate the sub-pixel lattice extraction, node classifications, and 1D Galois Field sequence matching achieved by the wave decoder:
+
+* **Pristine Reference Alignment:** [`synthetic_shot_clean_baseline.png`](./docs/samples/synthetic_shot_clean_baseline.png) $\to$ [Visual Tracking Output Overlay](./docs/samples/synthetic_shot_clean_baseline-diagnostic.png)
+* **Severe 45-Degree Pitch Tilt Target:** [`synthetic_shot_severe_pitch_tilt_45deg.png`](./docs/samples/synthetic_shot_severe_pitch_tilt_45deg.png) $\to$ [Visual Tracking Output Overlay](./docs/samples/synthetic_shot_severe_pitch_tilt_45deg-diagnostic.png)
+* **10% Random Recognition Dropouts Configuration:** [`synthetic_shot_erasures.png`](./docs/samples/synthetic_shot_erasures.png) $\to$ [Visual Tracking Output Overlay](./docs/samples/synthetic_shot_erasures-diagnostic.png)
+* **Combined Multi-Fault Extreme Stress Frame:** [`synthetic_shot_extreme_stress.png`](./docs/samples/synthetic_shot_extreme_stress.png) $\to$ [Visual Tracking Output Overlay](./docs/samples/synthetic_shot_extreme_stress-diagnostic.png)
+
+Test cases can be easily extended by editing camera intrinsics/extrinsics and running the automated code generation utilities to export paired diagnostic files.
+
+---
+
 
 ## Licensing
 
