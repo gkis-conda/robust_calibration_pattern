@@ -4,12 +4,15 @@ import numpy as np
 # =========================================================================
 _DEBUG_OUTPUT=False
 
+
 def debug_output():
     return _DEBUG_OUTPUT
+
 
 def set_debug_output(verbose: bool=True):
     global _DEBUG_OUTPUT
     _DEBUG_OUTPUT = verbose
+
 
 def get_phase_from_coordinates(r: int, c: int, lfsr_period: int = 31) -> tuple:
     """

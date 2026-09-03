@@ -248,7 +248,8 @@ class GridCrystalGrower:
             p_a, p_b, p_c = self.points[idx_a], self.points[idx_b], self.points[idx_c]
             score.append(p_a, p_b, p_c)
         if self.debug_output:
-            print("[DIAG] scaler:\n", score.grid_means)
+            with np.printoptions(threshold=np.inf, linewidth=200):
+                print("[DIAG] Inscribed radius distribution:\n", score.grid_means)
         deviation_score = 0.2
         for simplex in simplices:
             idx_a, idx_b, idx_c = simplex
@@ -554,14 +555,14 @@ class GridCrystalGrower:
                     if self.debug_output and dense_layout.size > 0:
                         output_matrices[root_id] = dense_layout
                         print(f"   -> Island {root_id} Shape: {dense_layout.shape}")
-                        print(dense_layout)
+                        with np.printoptions(threshold=np.inf, linewidth=200):
+                            print(dense_layout)
 
             queue = self._grow_topological_island_step(queue)
             if not queue:
                 break
 
         output_matrices = {}
-        np.set_printoptions(threshold=np.inf, linewidth=200)
         for root_id in self.global_grids.keys():
             if self.dsu.parents[root_id] == root_id:
                 dense_layout = convert_grid_to_matrix(self.global_grids[root_id])
@@ -569,7 +570,8 @@ class GridCrystalGrower:
                     output_matrices[root_id] = dense_layout
                     if self.debug_output:
                         print(f"   -> Island {root_id} Shape: {dense_layout.shape}")
-                        print(dense_layout)
+                        with np.printoptions(threshold=np.inf, linewidth=200):
+                            print(dense_layout)
         return output_matrices
 
 

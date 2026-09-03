@@ -58,17 +58,17 @@ Wave 2
 Also, decoding info for every extracted patch is collected as follows:
 
 ```text
-valid_mask: [0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1]
+row: 19, col 5, length: 13
+valid_mask: [1 1 1 1 1 1 1 1 1 1 0]
 patch:
- [[-1  0  1  1  1  0  0  1  0  0  0  0  1  0  1  0  1  0  1  1  1  1]
- [-1  1  0  0  0  1  0  0  0  0  0  0  0  0  1  1  1  1  0  1  1  0]]
-Hor:  {'origin_stream_phase': 30, 'recovered_sequence':, 'errors_corrected':, 'missing_gaps': array([0], dtype=int64), 'status': 'Corrected bit flip at index [2, 3] via syndrome projection', 'direction_key': 'V_forward'}
-Vert:  {'origin_stream_phase': 17, 'recovered_sequence':, 'errors_corrected':, 'missing_gaps': array([0], dtype=int64), 'status': 'Corrected bit flip at index [3, 4] via syndrome projection', 'direction_key': 'U_reverse'}
-{'status': 'success', 'row': 30, 'col': 29, 'b': (-17, 30, -13), 'horizontal_axis': 'V', 'direction': 'forward', 'errors_corrected': 4, 'erasures': 2}
-row: 33, col 9, length: 21
+ [[ 0  1  0  0  1  1  1  1  0  1  1  1  0]
+ [ 1  0  0  1  1  1  1  1  0  0  1 -1  1]]
+Hor:  {'origin_stream_phase': 4, 'recovered_sequence': [0, 0, 0, 0, 1, 1, 1, 0, 0, 1, 1], 'errors_corrected': [4, 5], 'missing_gaps': [10], 'status': 'Corrected bit flip at index [4, 5] via syndrome projection', 'direction_key': 'W_forward'}
+Vert:  {'origin_stream_phase': 17, 'recovered_sequence': [0, 1, 1, 1, 0, 0, 0, 1, 0, 1, 0, 1], 'errors_corrected': [7, 8], 'missing_gaps': [10, 11], 'status': 'Corrected bit flip at index [7, 8] via syndrome projection', 'direction_key': 'V_reverse'}
+[Warning] Consistency check failed. Skip
 ```
 
- * To review a complete, full-frame runtime console extraction log, see [**`random_tilt_full_log.txt`**](./docs/samples/random_tilt_full_log.txt), which tracks localized topological cell alignments, matrix patch outputs, and error-corrected phase outputs updated per tracking sweep layer for the "random tilt" dataset.
+ * To review a complete, full-frame runtime console extraction log, see [**`compound_rotation_7_0025_full_log.txt`**](./docs/samples/compound_rotation_7_0025_full_log.txt), which tracks localized topological cell alignments, matrix patch outputs, and error-corrected phase outputs for the "compound_rotation_7_0025.png" image created by blender script.
 
 
 ### 2. High-Fidelity Parametric Stress Benchmarks & Tracking Results
