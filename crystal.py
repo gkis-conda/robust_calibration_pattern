@@ -185,17 +185,18 @@ class GridCrystalGrower:
     Extracts valid geometric-topological islands one by one and 
     directly generates dense integer point lookup index matrices.
     """
-    def __init__(self, detected_points, wave_limit = 1000, debug_output = False):
+    def __init__(self, detected_points, wave_limit=1000):
         self.points = np.array(detected_points, dtype=np.float64)
         num_points = len(self.points)
+        if num_points < 3:
+            raise ValueError("[-] Error: No valid Delaunay edges generated.")
         self.kdtree = cKDTree(self.points) if num_points > 0 else None
         self.dsu = IslandDSU(num_points) if num_points > 0 else None
         self.triangulation = Delaunay(self.points)
         simplices = self.triangulation.simplices
         if len(simplices) == 0:
             raise ValueError("[-] Error: No valid Delaunay edges generated.")
-
-        self.debug_output = debug_output
+        self.debug_output = debug_output()
         # Calculate global median step across all triangulation edges
         all_dists = []
         for simplex in simplices:
@@ -220,7 +221,7 @@ class GridCrystalGrower:
         self.global_regs = {}   # master_root_id -> {point_idx: (u, v)}
         self.globally_processed_faces = set()
 
-    def find_all_valid_triangles(self, unvisited_indices):
+    def find_all_valid_triangles(self):
         """
         Computes a global Delaunay triangulation and filters faces by shape geometry.
         Returns ALL valid geometric faces without applying spatial suppression.
@@ -499,7 +500,6 @@ class GridCrystalGrower:
             print(f"[Diag] Wave step complete: Added {sticks_added_this_step} structural ears.")
         return next_queue
 
-
     def grow_island_lattice(self):
         """
         Relies entirely on find_all_valid_triangles for seeding.
@@ -510,10 +510,7 @@ class GridCrystalGrower:
         if points_num == 0:
             return output_matrices
             
-        # Extract the pure, pre-filtered topological face arrays from your Delaunay layer
-        # Pass all points to let it discover everything available
-        full_pool = set(range(points_num))
-        triangles = self.find_all_valid_triangles(full_pool)
+        triangles = self.find_all_valid_triangles()
         if not triangles:
             return output_matrices
 
@@ -576,15 +573,10 @@ class GridCrystalGrower:
         return output_matrices
 
 
-def reconstruct_mesh(detected_points, point_labels, m_seq_length=7):
+def reconstruct_mesh(detected_points):
     """
-    Executes multi-island barycentric crystal growth and reformats each independent 
-    topological island structure into its own isolated dense 2D index matrix.
+    Executes multi-island barycentric crystal growth.
     """
-    num_pts = len(detected_points)
-    if num_pts < int(m_seq_length):
-        return []
-
     grower = GridCrystalGrower(detected_points)
     
     islands_dict = grower.grow_island_lattice()

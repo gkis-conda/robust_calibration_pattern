@@ -31,8 +31,9 @@ More detailed descriptions of the underlying algorithms and result samples can b
 
 ## System Visualizations & Performance
 
-### 1. Real-Time Lattice Sub-Graph Front Propagation (ASCII Console Logs)
-During front-propagation execution, the wave-growth sub-graph engine (`crystal.py`) outputs a real-time, text-based matrix trace directly to the terminal console at every consecutive wave ring iteration step. This allows developers to inspect the exact state where our adaptive inradius ratio check isolates boundary noise while cleanly representing recognition dropouts as native `-1` tokens:
+### 1. Real-Time Lattice Sub-Graph Front Propagation & Syndrome Decoding Traces
+Use the `--verbose` flag to collect and display low-level debugging telemetry streams during execution.
+During front-propagation execution, the wave-growth sub-graph engine (`crystal.py`) outputs a real-time, text-based matrix trace directly to the terminal console at every consecutive wave ring iteration step. This allows developers to inspect the exact state of the DSU seed expansion:
 
 ```text
    -> Island 364 Shape: (2, 3)
@@ -54,7 +55,21 @@ Wave 2
  [ -1 237 260  -1]]
 ```
 
----
+Also, decoding info for every extracted patch is collected as follows:
+
+```text
+valid_mask: [0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1]
+patch:
+ [[-1  0  1  1  1  0  0  1  0  0  0  0  1  0  1  0  1  0  1  1  1  1]
+ [-1  1  0  0  0  1  0  0  0  0  0  0  0  0  1  1  1  1  0  1  1  0]]
+Hor:  {'origin_stream_phase': 30, 'recovered_sequence':, 'errors_corrected':, 'missing_gaps': array([0], dtype=int64), 'status': 'Corrected bit flip at index [2, 3] via syndrome projection', 'direction_key': 'V_forward'}
+Vert:  {'origin_stream_phase': 17, 'recovered_sequence':, 'errors_corrected':, 'missing_gaps': array([0], dtype=int64), 'status': 'Corrected bit flip at index [3, 4] via syndrome projection', 'direction_key': 'U_reverse'}
+{'status': 'success', 'row': 30, 'col': 29, 'b': (-17, 30, -13), 'horizontal_axis': 'V', 'direction': 'forward', 'errors_corrected': 4, 'erasures': 2}
+row: 33, col 9, length: 21
+```
+
+ * To review a complete, full-frame runtime console extraction log, see [**`random_tilt_full_log.txt`**](./docs/samples/random_tilt_full_log.txt), which tracks localized topological cell alignments, matrix patch outputs, and error-corrected phase outputs updated per tracking sweep layer for the "random tilt" dataset.
+
 
 ### 2. High-Fidelity Parametric Stress Benchmarks & Tracking Results
 Each synthetic stress configuration on our verification bench is paired with an automated tracking confirmation diagnostic plot (`*-diagnostic.png`). These overlays demonstrate the sub-pixel lattice extraction, node classifications, and 1D Galois Field sequence matching achieved by the wave decoder:

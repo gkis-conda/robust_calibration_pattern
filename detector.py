@@ -295,9 +295,9 @@ class HexagonalTopologyDetector:
     """
     def __init__(self, grid_rows, grid_cols):
         self.grid_size = (grid_cols, grid_rows)
-        self.decoder = AlgebraicGridDecoder32(grid_cols, grid_rows, True)
+        self.decoder = AlgebraicGridDecoder32(grid_cols, grid_rows)
 
-    def register_pattern(self, img, debug_overlay: True):
+    def register_pattern(self, img, debug_overlay=True):
         """
         Returns:
             dict: {(row, col): [x_px, y_px]} containing indexed sub-pixel centers.
@@ -314,7 +314,7 @@ class HexagonalTopologyDetector:
         if debug_overlay:
             visualize_detections(img, pts, labels)
 
-        matches_islands = reconstruct_mesh(pts, labels)
+        matches_islands = reconstruct_mesh(pts)
         matches = []
         for island in matches_islands:
             if debug_overlay:
@@ -362,7 +362,7 @@ if __name__ == "__main__":
     import os
 
 
-    def process_image(file_name, debug_overlay = False):
+    def process_image(file_name, debug_overlay=False):
         img = cv2.imread(file_name)
         if img is None:
             print(f"[Error] Visualizer failed to open file at: '{file_name}'", file=sys.stderr)
@@ -409,9 +409,10 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--output", type=str, default="", help="Output file path.")
     parser.add_argument("-C", "--calibrate", action='store_true', help="Perform focal distance and k1 calibration")
     parser.add_argument("--save-images", action="store_true", help="Save debug images")
+    parser.add_argument("-V", "--verbose", action="store_true", help="Add debug output to console")
 
     args = parser.parse_args()
-
+    set_debug_output(args.verbose)
     # Populate file-list for processing
     input_path = args.input
     valid_extensions = (".png", ".jpg", ".jpeg", ".bmp", ".tiff")

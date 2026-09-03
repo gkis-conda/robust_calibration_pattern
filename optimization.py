@@ -1,7 +1,7 @@
 import numpy as np
 import scipy.optimize
 from camera import ProjectiveCamera
-
+from lattice_topology import debug_output
 
 class FrameBundle:
     """
@@ -507,7 +507,8 @@ def strategy_nelder_mead(frame: FrameBundle, master_cam: ProjectiveCamera, coars
             cx=cx_cand, cy=cy_cand, k1=k1_ap_cand,
         )
         loss = menger_curvature_loss(frame, cam=modified_cam, loss=loss_type, step=step)
-        print(f"loss={loss:.4f} cx={cx_cand:.2f} cy={cy_cand:.2f} k1={k1_ap_cand:.6f} k_norm={k_norm:.3f}]")
+        if debug_output():
+            print(f"loss={loss:.4f} cx={cx_cand:.2f} cy={cy_cand:.2f} k1={k1_ap_cand:.6f} k_norm={k_norm:.3f}]")
         return loss
 
     # Every parameter axis starts exactly aligned at 0.0, representing the interval centers
@@ -613,7 +614,8 @@ def strategy_brent_grid(frame:FrameBundle, master_cam:ProjectiveCamera) -> tuple
                 best_final_cx = cx
                 best_final_cy = cy
         row += 1
-    print(k1_grid)
+    if debug_output()():
+        print(k1_grid)
     return best_final_k1_ap, best_final_cx, best_final_cy
 
 

@@ -173,7 +173,7 @@ Single-frame execution under pure rotational roll configurations introduces stan
 * **Centroid Detection Sensitivity:** Under extreme motion blur or severe sensor noise, contour fragmentation degrades sub-pixel centroid accuracy and shape classification, affecting lattice reconstruction.
 * **Minimal Decoding Block Dimension:** For successful spatial decoding, the framework requires at least an $11 \times 2$ node block footprint with a limited density of omissions and errors.
 * **Error Doubling Effect:** Every node misclassification or recognition dropout leads to a doubled error or erasure in the distilled 1D sequence due to the properties of the local 4-node XOR differential kernels, limiting the overall error-correction capability.
-* **Error Correction Saturation:** Decoding fails if multi-bit errors or consecutive omission bursts violate the underlying error-isolation and algebraic subspace boundaries [@macwilliams1977theory].
+* **Error Correction Saturation:** Decoding fails if multi-bit errors or consecutive omission bursts violate the underlying error-isolation approach.
 * **Implementation Complexity:** Higher conceptual overhead compared to simple tag-based fiducials, requiring discrete crystal-growth graphs and linear algebra over $\mathbb{GF}(2)$.
 
 ## Conclusion
