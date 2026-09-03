@@ -383,10 +383,7 @@ if __name__ == "__main__":
     # -p blender_output_asymmetric_circles -e asymmetric_circles -r 30 -c 31
     # -p blender_output_hexagonal
     args = parse_arguments()
-    LATTICE_ROW_COUNT = args.rows
-    LATTICE_COL_COUNT = args.cols
-    detector = create_detector(args.engine, grid_rows = LATTICE_ROW_COUNT, grid_cols = LATTICE_COL_COUNT)
-    
+    detector = create_detector(args.engine, grid_rows=args.rows, grid_cols=args.cols)
     DATASET_DIR = args.path
     if not os.path.exists(DATASET_DIR):
         print(f"Error: Target directory '{DATASET_DIR}' not found.")

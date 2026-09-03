@@ -195,14 +195,14 @@ class AlgebraicGridDecoder32:
     """
     MIN_UNIQUE_SEQUENCE_LEN = 11
 
-    def __init__(self, grid_width, grid_height, debug_output:bool = False):
+    def __init__(self, grid_width, grid_height):
         """Initializes the main grid environment and registers all 6 directional decoders."""
         self.r = 5  # Base polynomial degree
         self.lfsr_period = (1 << self.r) - 1
         self.N = self.lfsr_period  # Grid size / Period
         self.W = grid_width
         self.H = grid_height
-        self.debug_output = debug_output
+        self.debug_output = debug_output()
         assert self.W <= self.N and self.H <= self.N
 
         # Mapping all 6 forward and reciprocal directional polynomials
@@ -451,7 +451,8 @@ class AlgebraicGridDecoder32:
                     if self.check_error_consistency(res_h, res_v):
                         if np.count_nonzero(valid_mask_v) < MIN_VALID_BITS_NUM and\
                                 np.count_nonzero(valid_mask_h) < MIN_VALID_BITS_NUM:
-                            # the sequence may be not unique even if decoded corrrectly (this question should be considered separately)
+                                # the sequence may be not unique even if decoded corrrectly
+                                # this question should be considered separately
                             continue
                         # Translate lattice spaces back to absolute flat matrix positions
                         result = self.resolve_cell_index(res_h, res_v)
@@ -464,9 +465,12 @@ class AlgebraicGridDecoder32:
                                     and result['erasures'] < best_result['erasures']:
                                 best_result = result
                                 best_solution_found = True
-                                print("[Info] Consistency check passed. Best result updated.")
+                                if self.debug_output:
+                                    print("[Info] Consistency check passed. Best result updated.")
                     else:
-                        print("[Warning] Consistency check failed. Skip")
+                        if self.debug_output:
+                            print("[Warning] Consistency check failed. Skip")
+
         if best_solution_found:
             return best_result
         else:

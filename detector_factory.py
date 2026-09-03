@@ -88,7 +88,6 @@ def create_detector(engine_name, grid_rows, grid_cols):
 
     raise KeyError(f"Unsupported validation engine type token requested: '{engine_key}'")
 
-
 def parse_arguments(description="Benchmarking Controller"):
     """
     Parses arguments passed behind Blender's native '--' delimiter token.
@@ -99,13 +98,17 @@ def parse_arguments(description="Benchmarking Controller"):
     else:
         python_args = sys.argv[1:]
 
+    from lattice_topology import set_debug_output
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("-e", "--engine", type=str, default="hexagonal", help="Execution Engine ('hexagonal'/'opencv')")
     parser.add_argument("-p", "--path", type=str, default="./output", help="Working folder path")
     parser.add_argument("-r", "--rows", type=int, default=31, help="Lattice height count")
     parser.add_argument("-c", "--cols", type=int, default=31, help="Lattice width count")
+    parser.add_argument("-V", "--verbose", action="store_true", help="Enable debug output to console")
     parser.add_argument("--save-images", action="store_true", help="Export all high-fidelity rendered perspective-warped frames to PNG assets on disk.")
-    return parser.parse_args(python_args)
+    args = parser.parse_args(python_args)
+    set_debug_output(args.verbose)
+    return args
 
 
 if __name__ == "__main__":

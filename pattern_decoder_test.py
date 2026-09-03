@@ -378,8 +378,7 @@ def save_summary_markdown_report(results_dict: dict,
             f"| **{case_name}** | {comment} | {visible} | {recall:.2f}% | {precision:.2f}% | {status_tag} |"
         )
 
-
-    # 4. Append high-level global system telemetry metrics
+    # 3. Append high-level metrics
     md_content.append("\n## System Conformance Evaluation Analytics")
     md_content.append(f"- **Total Simulated Test Cases Checked:** {total_cases}")
     md_content.append(f"- **Total Successfully Passed Suites :** {passed_cases} / {total_cases}")
@@ -476,7 +475,7 @@ if __name__ == "__main__":
             "blueprint": np.copy(base_blueprint),
             "camera": {
                 "roll": 0.0, "pitch": 45.0, "yaw": 0.0,
-                "tx": DEFAULT_TX, "ty": H_NODES/2 * STEP_PX , "tz": Z_DISTANCE * 0.9  # Pushed closer to retain pixel scale
+                "tx": DEFAULT_TX, "ty": H_NODES/2 * STEP_PX, "tz": Z_DISTANCE * 0.9
             },
             "intrinsics": INTRINSICS
         }
