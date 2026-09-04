@@ -110,7 +110,7 @@ The physical features of the calibration pattern yield an average spot diameter 
 
 ### Topological Matching Performance
 
-| Test Case Name | Visible Nodes | Total Detected | Misclassified (Corrected) | False Detections | True Positives (TP) | Skip (Isolated) | Recall (%) |
+| Test Case| Visible Nodes | Total Detected | Misclassified (Corrected) | False Detections | True Positives (TP) | Skip (Isolated) | Recall (%) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | `clean_baseline` | 961 | 961 | 2 | 0 | 961 | 0 | 100.00 |
 | `oblique_tilt_high` | 952 | 889 | 63 | 0 | 888 | 1 | 93.28 |
@@ -119,25 +119,26 @@ The physical features of the calibration pattern yield an average spot diameter 
 | `roll_240` | 922 | 636 | 60 | 10 | 561 | 65 | 60.85 |
 | `roll_300` | 924 | 887 | 11 | 9 | 877 | 1 | 94.91 |
 | `roll_60` | 922 | 900 | 12 | 18 | 882 | 0 | 95.66 |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| `compound_rotation_0` | 916 | 920 | 39 | 24 | 896 | 0 | 97.82 |
-| `compound_rotation_1` | 928 | 774 | 18 | 5 | 767 | 2 | 82.65 |
-| `compound_rotation_2` | 440 | 425 | 5 | 29 | 396 | 0 | 90.00 |
-| `compound_rotation_3` | 957 | 641 | 61 | 2 | 505 | 134 | 52.77 |
-| `compound_rotation_4` | 450 | 418 | 12 | 8 | 407 | 3 | 90.44 |
-| `compound_rotation_5` | 633 | 618 | 13 | 38 | 580 | 0 | 91.63 |
-| `compound_rotation_6` | 944 | 898 | 75 | 7 | 885 | 6 | 93.75 |
-| `compound_rotation_7` | 953 | 578 | 45 | 20 | 369 | 189 | 38.72 |
+| **—** |  |  |  |  |  |  |  |
+| `comp_rot_0` | 916 | 920 | 39 | 24 | 896 | 0 | 97.82 |
+| `comp_rot_1` | 928 | 774 | 18 | 5 | 767 | 2 | 82.65 |
+| `comp_rot_2` | 440 | 425 | 5 | 29 | 396 | 0 | 90.00 |
+| `comp_rot_3` | 957 | 641 | 61 | 2 | 505 | 134 | 52.77 |
+| `comp_rot_4` | 450 | 418 | 12 | 8 | 407 | 3 | 90.44 |
+| `comp_rot_5` | 633 | 618 | 13 | 38 | 580 | 0 | 91.63 |
+| `comp_rot_6` | 944 | 898 | 75 | 7 | 885 | 6 | 93.75 |
+| `comp_rot_7` | 953 | 578 | 45 | 20 | 369 | 189 | 38.72 |
 
-Despite heavy illumination noise and aggressive geometric warping, the Galois parity-check framework maintains an absolute precision profile ($\text{Precision} = 100.0\%$) across all evaluation tests, yielding zero false positive identifications and matrix misalignments. The structural lattice consensus layer successfully resolves low-level shape misclassification conflicts on-the-fly. Architecturally, feature classification is required strictly for initial pattern matching; for all subsequent processing, only the invariant node centroids are utilized, because centroids are completely immune to key-point visual shape distortions.
 
-All metric ratios are evaluated relative to visible key-points of the master pattern footprint ($31 \times 31 = 961$ nodes) on the camera viewport. Under perspective slants and pixel intensity noise, the peak initial classification failure reaches 7.81% (`compound_rotation_6` with 75 corrupted labels), with a maximum pattern dropout rate of 61.28% (`compound_rotation_7` with only 369 true positives). Despite these concurrent data defects, the framework guarantees perfect, drift-free pattern registration across all test configurations.
+Despite heavy illumination noise and aggressive geometric warping, the Galois parity-check framework maintains an absolute precision profile ($\text{Precision} = 100.0\%$) across all evaluation tests, yielding zero false positive identifications and matrix misalignments. Low-level shape misclassifications within the lattice structure can be successfully resolved by error-correction capabilities on-the-fly. However, feature classification is required strictly for initial pattern matching and decoding; for all subsequent processing, only node centroids are utilized, while centroids are completely immune to key-point visual shape misclassification.
+
+All metric ratios are evaluated relative to visible key-points of the master pattern footprint ($31 \times 31 = 961$ nodes) on the camera viewport. Under perspective slants and pixel intensity noise, the peak initial classification failure reaches 7.81% (`comp_rot_6` with 75 corrupted labels), with a maximum pattern dropout rate of 61.28% (`comp_rot_7` with only 369 true positives). Despite these concurrent data defects, the framework guarantees perfect, drift-free pattern registration across all test configurations.
 
 ## Radial Distortion and Intrinsics Estimation
 
 ### Multi-Frame Calibration Accuracy
 
-| Intrinsics Parameter Matrix | Simple<br>GT | Simple<br>Solved | Simple<br>% Error | Random Tilt<br>GT | Random Tilt<br>Solved | Random Tilt<br>% Error |
+| Intrinsics Parameter | Simple | Simple<br> Solved | Simple<br> % Error | Random Tilt<br> GT | Random Tilt<br> Solved | Random Tilt<br> % Error |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
 | **Focal Length $f_x$** (px) | 1150.00 | 1152.97 | **0.26%** | 1250.00 | 1246.77 | **0.26%** |
 | **Focal Length $f_y$** (px) | 1150.00 | 1152.97 | **0.26%** | 1150.00 | 1144.15 | **0.51%** |
@@ -156,13 +157,13 @@ Below, the single-frame estimation results for tilted frames are presented:
 
 ### Single-Frame Performance Under Varying Key-point Dropouts
 
-| Evaluation Test View | True Positives (TP) | $f_x$ Solved<br>(% Err) | $f_y$ Solved<br>(% Err) | $c_x$ Solved<br>(% Err) | $c_y$ Solved<br>(% Err) | $\kappa_1$ Solved<br>(% Err) |
+| Evaluation Test View | True Positives (TP) | $f_x$ Solved<br> (% Err) | $f_y$ Solved<br> (% Err) | $c_x$ Solved<br> (% Err) | $c_y$ Solved<br> (% Err) | $\kappa_1$ Solved<br> (% Err) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| `compound_rotation_7` | 369 | 1386.55 (**10.92%**) | 1376.77 (**19.72%**) | 958.16 (**0.36%**) | 541.17 (**0.17%**) | -0.2568 (**71.19%**) |
-| `compound_rotation_4` | 407 | 1239.62 (**0.83%**)  | 1137.94 (**1.05%**)  | 961.53 (**0.18%**) | 540.33 (**0.25%**) | -0.1420 (**5.30%**)  |
-| `compound_rotation_1` | 767 | 1203.90 (**3.69%**)  | 1062.19 (**7.64%**)  | 962.06 (**0.15%**) | 538.89 (**0.38%**) | -0.1316 (**12.25%**) |
-| `compound_rotation_0` | 896 | 1295.18 (**3.61%**)  | 1215.90 (**5.73%**)  | 958.70 (**0.33%**) | 538.40 (**0.43%**) | -0.1778 (**18.50%**) |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| `comp_rot_7` | 369 | 1386.55 (**10.92%**) | 1376.77 (**19.72%**) | 958.16 (**0.36%**) | 541.17 (**0.17%**) | -0.2568 (**71.19%**) |
+| `comp_rot_4` | 407 | 1239.62 (**0.83%**)  | 1137.94 (**1.05%**)  | 961.53 (**0.18%**) | 540.33 (**0.25%**) | -0.1420 (**5.30%**)  |
+| `comp_rot_1` | 767 | 1203.90 (**3.69%**)  | 1062.19 (**7.64%**)  | 962.06 (**0.15%**) | 538.89 (**0.38%**) | -0.1316 (**12.25%**) |
+| `comp_rot_0` | 896 | 1295.18 (**3.61%**)  | 1215.90 (**5.73%**)  | 958.70 (**0.33%**) | 538.40 (**0.43%**) | -0.1778 (**18.50%**) |
+| **—** | **—** |  |  |  |  |  |
 | **Mean (3 Best Views)** | **—** | **1246.23 (0.30%)**   | **1138.68 (0.98%)**   | **960.76 (0.44%)** | **539.21 (0.70%)** | **-0.1505 (0.31%)**  |
 | **Series Consensus**   | **—** | **1246.77 (0.26%)**   | **1144.15 (0.51%)**   | **960.19 (0.25%)** | **540.23 (0.26%)** | **-0.1493 (0.45%)**  |
 
@@ -173,9 +174,9 @@ Individual single-frame geometric defects are systematically mitigated through a
 # Strengths, Limitations, and Concluding Remarks
 
 ## Architectural Strengths
-The results prove the practical capability and robustness of the error-correcting hexagonal pattern calibration approach. The straightforward calibration algorithm and modular, single-responsibility component structure enable experiments with different lattice encodings and future extensions. There is no need for any initial parameter value guess. 
+The results prove the practical capability and robustness of the error-correcting hexagonal pattern calibration approach. The straightforward calibration algorithm and modular, single-responsibility component structure enable experiments with different lattice encodings and future extensions.
 
-Camera extrinsic parameters are fully excluded from the calibration process, and the decoupling of distortion and intrinsics makes the algorithm defensive against parameter-coupling issues [@shortis1995isolated]. The framework can provide calibration by a single frame (less precise) or by a sequence. Furthermore, the framework shows high robustness to pattern occlusion, key-point dropouts, and key-point misclassification.
+Camera extrinsic parameters are fully excluded from the calibration process, and the decoupling of distortion and intrinsics makes the algorithm defensive against parameter-coupling issues [@shortis1995isolated]. The framework can provide calibration by a single frame (less precise) or by a sequence. Furthermore, the framework shows high robustness to pattern occlusion, key-point dropouts, and key-point misclassification. Moreover, there is no need for any initial parameter value guesses, which simplifies algorithm usage. The implementation detects degenerate cases and falls back into isotropic focal distance estimation.
 
 ## Limitations
 
