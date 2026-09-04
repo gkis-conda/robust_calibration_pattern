@@ -29,3 +29,12 @@ jobs:
       - name: Execute Calibration Test Bench
         run: |
           python pattern_decoder_test.py
+
+      - name: Upload Calibration Summary Report
+        uses: actions/upload-artifact@v4
+        with:
+            name: calibration-summary-metrics
+            path: ./output/summary_report.md
+            archive: false
+            overwrite: true
+            
