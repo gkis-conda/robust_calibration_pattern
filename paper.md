@@ -112,8 +112,8 @@ The physical features of the calibration pattern yield an average spot diameter 
 
 | Test Case| Visible Nodes | Total Detected | Misclassified (Corrected) | False Detections | True Positives (TP) | Skip (Isolated) | Recall (%) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| `clean_baseline` | 961 | 961 | 2 | 0 | 961 | 0 | 100.00 |
-| `oblique_tilt_high` | 952 | 889 | 63 | 0 | 888 | 1 | 93.28 |
+| `baseline` | 961 | 961 | 2 | 0 | 961 | 0 | 100.00 |
+| `tilt` | 952 | 889 | 63 | 0 | 888 | 1 | 93.28 |
 | `roll_120` | 924 | 890 | 8 | 8 | 880 | 2 | 95.24 |
 | `roll_180` | 961 | 976 | 14 | 17 | 958 | 1 | 99.69 |
 | `roll_240` | 922 | 636 | 60 | 10 | 561 | 65 | 60.85 |
@@ -146,12 +146,11 @@ All metric ratios are evaluated relative to visible key-points of the master pat
 | **Principal Point $c_y$** (px) | 540.00  | 538.45  | **0.14%** | 543.00  | 540.23  | **0.26%** |
 | **Distortion Coef. $\kappa_1$** | -0.2000 | -0.2098 | **4.88%** | -0.1500 | -0.1493 | **0.45%** |
 
-Distortion calibration results are computed using robust median consensus across 9 multi-view frames. The **decoupled approach** completely suppresses parameter cross-talk across distinct geometric configurations:
+Distortion calibration results are computed using robust median consensus across 9 multi-view frames. Stage A recovers the radial distortion coefficient $\kappa_1$ through median consensus via plumb-line straightness constraints [@de2011uncalibrated]. Stage B uses Zhang's vanishing point method on the rectified, undistorted coordinates to evaluate intrinsics [@zhang2000flexible]. The **decoupled approach** suppresses parameter cross-talk across distinct geometric configurations:
 
-* **Rotational Dataset (Isotropic Case):** Despite the absolute absence of spatial translation (which nominally triggers severe $f_x = f_y$ scale coupling and depth degeneracy), inverse feature blob size weighting and multi-scale chord regularization estimates underlying straightness invariants with high precision. Focal length reconstruction achieves a **0.26% error** under degenerate geometric conditions.
-* **Random Tilt Dataset (Anisotropic Case):** Over 9 frames containing aggressive perspective tilt, the framework successfully unlocks the full camera matrix. Stage A recovers the radial distortion coefficient $\kappa_1$ through median consensus via plumb-line straightness constraints [@de2011uncalibrated]. Stage B uses Zhang's vanishing point method on the rectified, undistorted coordinates to evaluate intrinsics [@zhang2000flexible]. The final intrinsic error parameters are strictly bounded: $\le$ 0.51% for focal lengths and $\le$ 0.26% for principal point offsets.
-
-
+* **Rotational Dataset (Isotropic Case):** Having only a single image `tilt` with a tilted and translated camera setup (which nominally triggers severe scale coupling and depth degeneracy), inverse feature blob size weighting and multi-scale chord regularization estimate the underlying straightness invariants with high precision.
+ Focal length reconstruction error does not exceed a 0.3% under degenerate geometric conditions, effectively filtering out every degenerate frame.
+* **Random Tilt Dataset (Anisotropic Case):** Over 9 frames containing aggressive perspective tilt, the framework successfully unlocks the full camera matrix. The focal length error are  bounded: $\le$ 0.6%.
 
 Below, the single-frame estimation results for tilted frames are presented:
 
@@ -186,22 +185,14 @@ Camera extrinsic parameters are fully excluded from the calibration process, and
 
 ## Conclusion
 
-The B-HGP framework fuses error-correcting codes and the structural robustness of a hexagonal grid. By combining the spatial efficiency of hexagonal lattices with M-sequence noise immunity, it enables independent multi-stage calibration using fundamental geometric invariants like vanishing points and absolute conics [@zhang2000flexible; @hartley2003multiple]. For applications requiring single-frame calibration under severe out-of-plane perspective, lens aberrations, or uncontrolled environments (mobile robotics, autonomous vehicles, industrial photogrammetry), B-HGP provides a compelling alternative to conventional tag-based targets. 
+The B-HGP framework fuses error-correcting codes with the structural robustness of a hexagonal grid. By combining the spatial efficiency of hexagonal lattices with M-sequence noise immunity, it enables independent multi-stage calibration using fundamental geometric invariants like vanishing points and absolute conics [@zhang2000flexible; @hartley2003multiple]. For applications requiring single-frame calibration under severe out-of-plane perspective, lens aberrations, or uncontrolled environments (mobile robotics, autonomous vehicles, industrial photogrammetry), B-HGP provides a compelling alternative to conventional tag-based targets. 
 
-This approach is not limited to binary sequences of the 5th degree; it is extensible with other primitive polynomials and different lattice configurations. This investigation shows the power of the Galois pattern for practical applications in different computer vision tasks.
-
-# Availability
-
-The open-source implementation, full test suite, Blender benchmark generators, and validation tools are publicly available at: https://github.com
-
-# References
-
-**Note:** This software paper documents the implementation of research presented in a draft manuscript under consideration for publication in the *International Journal of Computer Vision* (IJCV).
+This approach is not limited to binary sequences of the 5th degree; it is extensible with other primitive polynomials and different lattice configurations. This investigation shows the power of the Galois pattern for practical applications across different computer vision tasks.
 
 # Availability
 
-The open-source implementation, full test suite, Blender benchmark generators, and validation tools are publicly available at: https://github.com/gkis-conda/robust_calibration_pattern
+The open-source implementation, full test suite, Blender benchmark generators, and validation tools are publicly available at: [https://github.com/gkis-conda/robust_calibration_pattern](https://github.com/gkis-conda/robust_calibration_pattern)
 
 # References
 
-**Note:** This software paper documents the implementation of research presented in a draft manuscript under consideration for publication in the *International Journal of Computer Vision* (IJCV).
+**Note:** This software paper documents the implementation of research presented in a draft manuscript under consideration for publication in the *International Journal of Computer Vision* (IJCV) / *Journal of Mathematical Imaging and Vision* (JMIV).
