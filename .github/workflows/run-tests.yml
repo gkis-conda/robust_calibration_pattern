@@ -35,6 +35,6 @@ jobs:
         with:
             name: calibration-summary-metrics
             path: ./output/summary_report.md
-            archive: false
+            compression-level: 0
             overwrite: true
             
