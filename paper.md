@@ -19,23 +19,17 @@ bibliography: paper.bib
 
 # Summary
 
-Traditional calibration target registration degrades significantly under severe motion blur, perspective slant, and high non-linear lens distortion. This paper introduces the Binary Hexagonal Galois Pattern (B-HGP) framework: a single-frame pattern registration method that maps one-dimensional Galois Field $M$-sequences onto a two-dimensional regular hexagonal lattice. The resulting target topology encodes absolute spatial coordinates locally, supports simultaneous algebraic error and recognition dropout recovery, and tolerates severe perspective shear, motion blur, and localized target occlusions. 
+This work numerically demonstrates the digital camera calibration capabilities of the Binary Hexagonal Galois Pattern (B-HGP) framework. We present an open-source repository that provides a Python-based implementation of the B-HGP framework for single-frame camera intrinsic and radial distortion calibration. The software implements the generation, extraction, tracking, and algebraic decoding of error-correcting codes embedded natively onto a regular two-dimensional hexagonal lattice. 
 
-The implemented calibration approach leverages the strong statistical and geometric properties of the proposed pattern alongside its structural robustness to sensor noise. Stress tests under severe perspective foreshortening demonstrate that the unified algebraic pipeline bounds tracking displacement errors within 0.6–0.9 pixels while maintaining a flawless precision profile (zero identity mismatches or alignment drifts). A novel decoupled calibration approach completely separates radial distortion recovery from intrinsic parameter estimation, achieving high parameter accuracy on both isotropic and anisotropic camera models across multi-frame and single-view configurations alike.
+The software architecture is engineered to maintain target registration under aggressive perspective shear, spatial occlusions, and optical noise. By utilizing a cascaded, decoupled multi-phase calibration solver, the pipeline separates radial lens distortion optimization from the projective camera matrix recovery. The package includes fully automated verification test benches and a photorealistic rendering simulation suite built on top of the Blender 2.92 API to ensure complete reproducibility of photogrammetric validation tracking.
 
 # Statement of Need
 
-The fast and robust calibration of multi-sensor devices in self-navigating systems has become critical with the rapid development of autonomous vehicles, augmented reality headsets, and omnidirectional 360-degree cameras utilizing visual sensor fusion for precise spatial self-positioning. A fundamental requirement for successful sensor fusion is the accurate estimation of sensor extrinsic parameters, which relies on strict temporal and spatial synchronization achieved via known multi-sensor baseline signals.
+Accurate sensor calibration is a fundamental prerequisite for visual-inertial odometry, autonomous navigation, and multi-sensor data fusion networks. While conventional fiducial frameworks—such as AprilTags [@Olson2011AprilTag], ArUco [@garrido2014aruco], WhyCode [@lightbody2017WhyCode], or standard chessboard layouts—are widely deployed, their software implementations frequently encounter feature extraction dropouts on the image periphery when observed under severe radial barrel distortion and high out-of-plane perspective slants. 
 
-The calibration of multi-sensor setups, particularly Visual-Inertial Navigation Systems (VINS), faces severe challenges when resolving coupled spatiotemporal parameters. These difficulties are frequently compounded by partial occlusions, rapid tracking accelerations, and illumination variations when using standard calibration targets. To address these vulnerabilities, this paper introduces a novel calibration pattern that embeds error-correcting pseudo-random codes directly onto a regular hexagonal lattice.
+The B-HGP package addresses these operational pipeline vulnerabilities by exposing an open-source, modular codebase driven by discrete crystal-growth graph routing and algebraic linear decoding over $\mathbb{GF}(2)$. This software serves the computer vision and mobile robotics communities by providing an alternative calibration workflow that handles random feature recognition dropouts and isolates calibration parameters without cross-talk. 
 
-Circle grids, tag-based fiducials like AprilTags [@Olson2011AprilTag], ArUco [@garrido2014aruco], or WhyCode [@lightbody2017WhyCode], and chessboard or ChArUco patterns remain the industrial standards for camera calibration [@zhang2000]. However, these classical methodologies present significant operational constraints in unconstrained real-world environments:
-
-* **Occlusions and Spatial Payload Overhead:** Fiducial markers require intact tag matrices to resolve absolute identification, leaving them vulnerable to partial occlusions, lens defocus, and heavy perspective warping.
-* **Blur Sensitivity:** Standard checkerboard corner extraction algorithms degrade rapidly under motion or out-of-focus blur, restricting calibration workflows to static, heavily controlled multi-frame capture routines.
-* **Spatial Scale Constraints:** Hybrid designs like ChArUco partially mitigate data loss but scale poorly across variable camera distances.
-* **Localization Bias:** Circular patterns suffer from perspective localization center bias under tilted views, requiring complex implicit estimation to recover true algebraic projection centers [@mallon2007precise].
-* **Radial Distortion:** Ultra-wide and fisheye lenses introduce catastrophic radial barrel distortion that leads to feature extraction dropouts on the image periphery, breaking standard graph tracking connectivity loops.
+This software paper serves strictly as an open-source implementation report documenting the programmatic toolkit of the B-HGP framework. The comprehensive mathematical proofs, deep algebraic foundations, and formal geometric theorems governing this methodology are presented in a standalone theoretical manuscript currently under consideration for publication in the International Journal of Computer Vision (IJCV) / Journal of Mathematical Imaging and Vision (JMIV).
 
 # Architecture and Implementation
 
@@ -46,9 +40,14 @@ B-HGP encodes three independent binary $M$-sequences into a regular hexagonal la
 $$B(r, c) = U[u \bmod 31] \oplus V[v \bmod 31] \oplus W[w \bmod 31]$$
 
 where $r$ represents the row coordinate, $c$ denotes the column coordinate, and the barycentric coordinate space components are defined as:
-* $v = r$
-* $u = c - \lfloor r/2 \rfloor$
-* $w = - u - v$
+
+$$
+\begin{aligned}
+v &= r \\
+u &= c - \lfloor r/2 \rfloor \\
+w &= - u - v
+\end{aligned}
+$$
 
 Each M-sequence is generated from a primitive 5th-order Linear Feedback Shift Register (LFSR) polynomial over the Galois Field $\mathbb{GF}(2)$ [@macwilliams1977theory], producing sequences of maximum period $L = 2^5 - 1 = 31$. The primary property of this topology is that any 5-bit sliding window within an M-sequence reveals a completely unique local phase address, enabling single-frame absolute coordinate recovery from small, isolated pattern fragments.
 
@@ -57,46 +56,55 @@ Each M-sequence is generated from a primitive 5th-order Linear Feedback Shift Re
 The single-frame calibration workflow executes sequentially through six deterministic processing phases:
 
 ### 1. Optical Feature Extraction
-Detects candidate nodes and classifies their topological profiles (circles versus triangles) using adaptive local binarization, contour solidity filtering, and continuous distance classification via circularity metrics. Circles encode bit state "0", and triangles encode bit state "1". Features are validated against image boundaries to eliminate partial or cut shapes.
+Detects candidate nodes and classifies their topological profiles (circles versus triangles) using adaptive local binarization, contour solidity filtering, and continuous distance classification via circularity metrics. Circles encode bit state "0", and triangles encode bit state "1". Features are validated against image boundaries to eliminate partial or cut shapes. The sub-pixel centroid approximation determines key-point projection centers that remain invariant to topological shape classification results, as this center definition naturally fits any regular polygon, including circles or triangles.
 
 ### 2. Lattice Reconstruction via Crystal Growth
 Assembles unorganized sub-pixel barycenters into stable hexagonal coordinate networks via Delaunay triangulation nucleation under strict local triangle coherence constraints. Hexagonal grid topologies expand outward from verified seeds via a systematic front-propagation queue. To protect the growth horizon from non-linear lens compression and edge distortion shears, the engine evaluates local neighborhood changes using a scale-invariant, direction-blind triangle inradius ratio metric. Isolated sub-graph islands are securely merged using a Disjoint Set Union (DSU) forest with parallelogram closure verification to guarantee structural lattice reconstruction under extreme perspective warping.
 
 ### 3. 1D Axis Distillation
-Evaluates each crystalline segment by applying local 4-node XOR sliding kernels, isolating three independent 1D stream vectors:
-* **U-axis:** $dU[i] = B[r, c+1] \oplus B[r, c+2] \oplus B[r+1, c] \oplus B[r+1, c+1]$
-* **W-axis:** $dW[i] = B[r, c] \oplus B[r, c+1] \oplus B[r+1, c] \oplus B[r+1, c+1]$
+Inspects each crystalline segment by applying local 4-node XOR sliding kernels to isolate independent 1D stream vectors for the U-axis and W-axis:
 
-These differential operators perfectly cancel two of the three component sequences, yielding clean, independent 1D M-sequence fragments.
+$$
+\begin{aligned}
+    dU[i] &= B[r, c+1] \oplus B[r, c+2] \oplus B[r+1, c] \oplus B[r+1, c+1] \\
+    dW[i] &= B[r, c] \oplus B[r, c+1] \oplus B[r+1, c] \oplus B[r+1, c+1]
+\end{aligned}
+$$
+
+These differential operators perfectly cancel two of the three component sequences, yielding clean, independent 1D M-sequence fragments for subsequent decoding. The underlying polynomials are strictly connected by the hexagonal symmetry of the target topology. If we identify $U$, then $W$ must correspond to $U+1$ in terms of the six available axial directions.
 
 ### 4. Algebraic Binary Sequence Decoding
-Processes each extracted 1D stream through a syndrome decoder pipeline. Single bit-flips are repaired via syndrome evaluation and algebraic locator polynomials [@lin2004error], while recognition dropouts are resolved via a deterministic greedy decoding pass. Convergence to absolute phase position is established via parity-check matrix inversion. At this step, two orthogonal axes are matched to the sequence, and the sequence phases are evaluated.
+Processes each extracted 1D stream through a syndrome decoder pipeline that greedily minimizes the resulting error syndrome vector over $\mathbb{GF}(2)$ using a Toeplitz parity-check matrix [@lin2004error]. The algorithm operates sequentially: it first fills missing recognition dropouts (erasures) via a deterministic greedy search pass to minimize the syndrome weight, and subsequently isolates remaining bit-flips by mapping the residual syndrome directly onto the column space of the parity-check matrix. 
+
+During this phase, a bank of six primitive polynomials sequentially attempts to decode the extracted streams. Successful decoding of the first distilled stream uniquely identifies its underlying polynomial index $U$. To eliminate false positives, the second stream extracted from the same buffer is cross-validated against the adjacent polynomial index $U + 1$. Upon successful validation, the recovered 1D sub-sequences are matched directly to the identified master cyclic sequences, evaluating the absolute sub-sequence phases.
 
 ### 5. Coordinate Phase Locking
-Merges resolved phases from independent orthogonal axes to establish absolute global $(u, v, w)^T$ matrix indices via the intersection of 1D decoded phases. The exact barycentric-to-matrix mapping ensures zero row-parity shearing during coordinate transformation and guarantees isotropic geometric transformation invariance under hexagonal rotations. After phase localization, the separated planar crystallines are merged into a common matrix that corresponds to the genuine pattern.
+Merges resolved phases from independent orthogonal axes to establish absolute global $(r, c)$ matrix indices via the intersection of 1D decoded phases. The exact barycentric-to-matrix mapping restores exact topological axes direction alignment. After phase localization, the separated planar crystals are merged into a common matrix that corresponds to the genuine pattern layout.
 
 ### 6. Decoupled Camera Calibration
-The restored hexagonal lattice provides perfect sets of collinear lines easily extracted along hexagonal directions to enable a plumb-line calibration approach. Unlike traditional joint optimization methods for the Brown-Conrady model [@brown1971close] that couple distortion parameters and intrinsic variables, the framework employs a two-stage cascaded decoupling strategy:
-* **Stage A (Distortion Recovery):** Optimize the radial lens distortion coefficient $\kappa_1$ and distortion center $(c_x, c_y)$ directly from raw plumb-line inputs, minimizing Menger curvature loss with a fixed focal distance aperture [@de2011uncalibrated].
-* **Stage B (Intrinsic Calibration):** Apply the resolved distortion correction to the detected points. Having undistorted ideal lines, it is possible to reconstruct vanishing points and apply Zhang's closed-form solution for intrinsics recovery via planar homography [@zhang2000; @zheng2013geometric]. Then, the radial distortion parameter $\kappa_1$ is renormalized to this calculated calibration to fully restore the final Brown-Conrady model [@brown1971close].
+The restored hexagonal lattice provides perfect sets of collinear lines easily extracted along hexagonal directions to enable a plumb-line calibration approach. Unlike traditional joint optimization methods for the Brown-Conrady model [@brown1971close] that couple distortion parameters and intrinsic variables, the framework employs a two-stage cascaded decoupling strategy [@shortis1995isolated]:
 
-This decoupling eliminates parameter cross-talk and ensures fast, stable convergence even under degenerate geometric configurations, such as pure rotational sequences or extreme perspective views.
+* **Stage A (Distortion Recovery):** Optimize the radial lens distortion coefficient $\kappa_1$ and distortion center $(c_x, c_y)$ directly from raw plumb-line inputs, minimizing Menger curvature loss with a fixed focal distance aperture [@de2011uncalibrated].
+
+* **Stage B (Intrinsic Calibration):** Apply the resolved distortion correction to the detected points. Utilizing the rectified, undistorted ideal lines, the framework reconstructs vanishing points to find the plane-induced homographies. These homography matrices are then embedded directly into the absolute dual conic constraints, enabling Zhang's closed-form linear solution to evaluate the camera intrinsic parameters ($f_x, f_y, c_x, c_y$) [@zhang2000flexible; @hartley2003multiple]. Finally, the radial distortion coefficient $\kappa_1$ is renormalized relative to this stabilized intrinsic matrix to completely restore the operational Brown-Conrady lens model [@brown1971close].
+
+This decoupling eliminates parameter cross-talk and ensures fast, stable convergence even under degenerate geometric configurations, such as almost pure rotational sequences with weak perspectivity.
 
 ## Software Architecture
 
 The framework's implementation is modularized into dedicated structural components:
 
-* `m_sequence.py`: Manages Galois Field Linear Feedback Shift Register (LFSR) generation, Toeplitz parity-check matrices, algebraic linear solvers over $\mathbb{GF}(2)$, and error-correcting capacity analysis [@macwilliams1977theory].
+* `m_sequence.py`: Manages Galois Field Linear Feedback Shift Register (LFSR) generation, Toeplitz parity-check matrices, algebraic linear solvers over $\mathbb{GF}(2)$, and hosts the error-correcting analysis class `MSequenceAnalyzer` [@macwilliams1977theory].
 * `lattice_topology.py`: Handles barycentric coordinate transformations, matrix hexagonal rotation helpers, and hexagonal graph-to-matrix grid conversions.
 * `matcher.py`: Performs 1D axis distillation via 4-node XOR kernels and encapsulates the `AlgebraicGridDecoder32` master decoder routine (syndrome analysis, error/erasure correction, and phase locking) [@lin2004error].
-* `crystal.py`: Implements wave-growth topological island reconstruction via Delaunay triangulation, Disjoint Set Union (DSU) forest management, and parallelogram closure validation.
+* `crystal.py`: Implements wave-growth topological island reconstruction via Delaunay triangulation, Disjoint Set Union (DSU) forest management, and parallelogram closure validation via the class `GridCrystalGrower`.
 * `detector.py`: Executes adaptive image binarization, solidity-based shape classification, topological lattice assembly, and final node verification.
-* `camera.py`: Evaluates camera projection matrix estimation and radial lens distortion modeling via straightness metrics [@de2011uncalibrated].
-* `optimization.py`: Orchestrates the multi-frame calibration pipeline.
+* `camera.py`: Models a projective pin-hole camera with radial lens distortion [@hartley2003multiple].
+* `optimization.py`: Orchestrates the multi-frame camera calibration pipeline. Provides a two-stage decoupled calibration sequence similar to the approach in [@shortis1995isolated].
 
 # Experimental Results
 
-The codebase includes comprehensive synthetic benchmarks and Blender 2.92 photorealistic scene generation to systematically analyze tracking performance and structural robustness under severe perspective warping and heavy image noise. The sub-pixel centroid approximation determines key-point projection centers that remain invariant to topological shape classification results (this center definition naturally fits any regular polygon, including circles or triangles).
+The codebase includes comprehensive synthetic benchmarks and Blender 2.92 photorealistic scene generation to systematically analyze tracking performance and structural robustness under severe perspective warping and heavy image noise. We considered two simulated camera configurations: the simple frameset, characterized by an isotropic focal length and camera rolling (from 0° to 300° degrees) supplemented by a tilted image to resolve perspective ambiguity along with a baseline frame; and the compound rotation (random tilt) frameset, where an anisotropic focal length camera generates 8 randomly rotated frames and a baseline frame.
 
 ## Pattern Registration Performance
 
@@ -104,90 +112,90 @@ The physical features of the calibration pattern yield an average spot diameter 
 
 ### Topological Matching Performance
 
-| Test Case Name | GT Nodes | Total Detected | Misclassified (Corrected) | False Detections | True Positives (TP) | Skip (Isolated) | Recall (%) |
+| Test Case| Visible Nodes | Total Detected | Misclassified (Corrected) | False Detections | True Positives (TP) | Skip (Isolated) | Recall (%) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Standard Rotational Sequences** | | | | | | | |
-| `clean_baseline` | 961 | 961 | 2 | 0 | 961 | 0 | 100.00 |
-| `oblique_tilt_high` | 952 | 889 | 63 | 0 | 888 | 1 | 93.28 |
+| `baseline` | 961 | 961 | 2 | 0 | 961 | 0 | 100.00 |
+| `tilt` | 952 | 889 | 63 | 0 | 888 | 1 | 93.28 |
 | `roll_120` | 924 | 890 | 8 | 8 | 880 | 2 | 95.24 |
 | `roll_180` | 961 | 976 | 14 | 17 | 958 | 1 | 99.69 |
 | `roll_240` | 922 | 636 | 60 | 10 | 561 | 65 | 60.85 |
 | `roll_300` | 924 | 887 | 11 | 9 | 877 | 1 | 94.91 |
 | `roll_60` | 922 | 900 | 12 | 18 | 882 | 0 | 95.66 |
-| **Complex 3D Galois Stress-Test Sequences** | | | | | | | |
-| `compound_rotation_0` | 916 | 920 | 39 | 24 | 896 | 0 | 97.82 |
-| `compound_rotation_1` | 928 | 774 | 18 | 5 | 767 | 2 | 82.65 |
-| `compound_rotation_2` | 440 | 425 | 5 | 29 | 396 | 0 | 90.00 |
-| `compound_rotation_3` | 957 | 641 | 61 | 2 | 505 | 134 | 52.77 |
-| `compound_rotation_4` | 450 | 418 | 12 | 8 | 407 | 3 | 90.44 |
-| `compound_rotation_5` | 633 | 618 | 13 | 38 | 580 | 0 | 91.63 |
-| `compound_rotation_6` | 944 | 898 | 75 | 7 | 885 | 6 | 93.75 |
-| `compound_rotation_7` | 953 | 578 | 45 | 20 | 369 | 189 | 38.72 |
+| **—** |  |  |  |  |  |  |  |
+| `comp_rot_0` | 916 | 920 | 39 | 24 | 896 | 0 | 97.82 |
+| `comp_rot_1` | 928 | 774 | 18 | 5 | 767 | 2 | 82.65 |
+| `comp_rot_2` | 440 | 425 | 5 | 29 | 396 | 0 | 90.00 |
+| `comp_rot_3` | 957 | 641 | 61 | 2 | 505 | 134 | 52.77 |
+| `comp_rot_4` | 450 | 418 | 12 | 8 | 407 | 3 | 90.44 |
+| `comp_rot_5` | 633 | 618 | 13 | 38 | 580 | 0 | 91.63 |
+| `comp_rot_6` | 944 | 898 | 75 | 7 | 885 | 6 | 93.75 |
+| `comp_rot_7` | 953 | 578 | 45 | 20 | 369 | 189 | 38.72 |
 
-Despite heavy illumination noise and aggressive geometric warping, the Galois parity-check framework maintains an absolute precision profile ($\text{Precision} \equiv 1.000$) across all evaluation tests, yielding zero false positive identifications and matrix misalignments. The structural lattice consensus layer successfully resolves low-level shape misclassification conflicts on-the-fly. Architecturally, feature classification is required strictly for initial pattern matching; for all subsequent processing, only the invariant node centroids are utilized, rendering the metric backend completely immune to key-point visual shape distortions.
 
-All metric ratios are evaluated relative to the visible key-points of the master pattern footprint ($31 \times 31 = 961$ nodes). Under extreme non-linear perspective slants, the peak initial classification failure reaches 7.7% (`compound_rotation_6` with 74 corrupted labels), while extreme out-of-plane tilts force a maximum pattern dropout rate of 60.67% (`compound_rotation_7` with only 369 true positives). Despite these concurrent data defects, the framework guarantees perfect, drift-free pattern registration across all test configurations.
+Despite heavy illumination noise and aggressive geometric warping, the Galois parity-check framework maintains an absolute precision profile ($\text{Precision} = 100.0\%$) across all evaluation tests, yielding zero false positive identifications and matrix misalignments. Low-level shape misclassifications within the lattice structure can be successfully resolved by error-correction capabilities on-the-fly. However, feature classification is required strictly for initial pattern matching and decoding; for all subsequent processing, only node centroids are utilized, while centroids are completely immune to key-point visual shape misclassification.
+
+All metric ratios are evaluated relative to visible key-points of the master pattern footprint ($31 \times 31 = 961$ nodes) on the camera viewport. Under perspective slants and pixel intensity noise, the peak initial classification failure reaches 7.81% (`comp_rot_6` with 75 corrupted labels), with a maximum pattern dropout rate of 61.28% (`comp_rot_7` with only 369 true positives). Despite these concurrent data defects, the framework guarantees perfect, drift-free pattern registration across all test configurations.
 
 ## Radial Distortion and Intrinsics Estimation
 
 ### Multi-Frame Calibration Accuracy
 
-| Intrinsics Parameter Matrix | Simple GT | Simple Solved | Simple % Error | Random Tilt GT | Random Tilt Solved | Random Tilt % Error |
+| Intrinsics Parameter | Simple | Simple<br> Solved | Simple<br> % Error | Random Tilt<br> GT | Random Tilt<br> Solved | Random Tilt<br> % Error |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
 | **Focal Length $f_x$** (px) | 1150.00 | 1152.97 | **0.26%** | 1250.00 | 1246.77 | **0.26%** |
 | **Focal Length $f_y$** (px) | 1150.00 | 1152.97 | **0.26%** | 1150.00 | 1144.15 | **0.51%** |
 | **Principal Point $c_x$** (px) | 960.00  | 961.23  | **0.06%** | 965.00  | 960.19  | **0.25%** |
 | **Principal Point $c_y$** (px) | 540.00  | 538.45  | **0.14%** | 543.00  | 540.23  | **0.26%** |
-| **Distortion Coefficient $\kappa_1$** | -0.2000 | -0.2098 | **4.88%** | -0.1500 | -0.1493 | **0.45%** |
+| **Distortion Coef. $\kappa_1$** | -0.2000 | -0.2098 | **4.88%** | -0.1500 | -0.1493 | **0.45%** |
 
-Distortion calibration results are computed using robust median consensus across 9 multi-view frames. The **decoupled approach** completely suppresses parameter cross-talk across distinct geometric configurations:
+Distortion calibration results are computed using robust median consensus across 9 multi-view frames. Stage A recovers the radial distortion coefficient $\kappa_1$ through median consensus via plumb-line straightness constraints [@de2011uncalibrated]. Stage B uses Zhang's vanishing point method on the rectified, undistorted coordinates to evaluate intrinsics [@zhang2000flexible]. The **decoupled approach** suppresses parameter cross-talk across distinct geometric configurations:
 
-* **Rotational Dataset (Isotropic Case):** Despite the absolute absence of spatial translation (which nominally triggers severe $f_x = f_y$ scale coupling and depth degeneracy), inverse feature-mass weighting and multi-scale chord regularization isolate underlying straightness invariants with exceptional precision. Focal length reconstruction achieves a minimal **0.26% error** under degenerate geometric conditions.
-* **Random Tilt Dataset (Anisotropic Case):** Over 9 frames containing aggressive perspective tilt, the framework successfully unlocks the full camera matrix. Stage A recovers the radial distortion coefficient $\kappa_1$ through median consensus via plumb-line straightness constraints [@de2011uncalibrated]. Stage B uses Zhang's vanishing point method on the rectified, undistorted coordinates to refine intrinsics [@zhang2000]. The final intrinsic error parameters are strictly bounded: $\le$ 0.51% for focal lengths and $\le$ 0.26% for principal point offsets.
+* **Rotational Dataset (Isotropic Case):** Having only a single image `tilt` with a tilted and translated camera setup (which nominally triggers severe scale coupling and depth degeneracy), inverse feature blob size weighting and multi-scale chord regularization estimate the underlying straightness invariants with high precision.
+ Focal length reconstruction error does not exceed a 0.3% under degenerate geometric conditions, effectively filtering out every degenerate frame.
+* **Random Tilt Dataset (Anisotropic Case):** Over 9 frames containing aggressive perspective tilt, the framework successfully unlocks the full camera matrix. The focal length error are  bounded: $\le$ 0.6%.
 
-### Single-Frame Performance Under Varying Occlusion
+Below, the single-frame estimation results for tilted frames are presented:
 
-| Evaluation Test View | Detected True Positives (TP) | $f_x$ Percentage Error | $f_y$ Percentage Error | $\kappa_1$ Percentage Error |
-| :--- | :---: | :---: | :---: | :---: |
-| View 0 | 896 | 3.61% | 5.73% | 18.50% |
-| View 1 | 767 | 3.69% | 7.64% | 12.25% |
-| View 4 | 407 | 0.83% | 1.05% | 5.30% |
-| View 7 | 369 | 10.92% | 19.72% | 71.19% |
-| **Multi-Frame Consensus (9 Views)** | **3,113** | **0.26%** | **0.51%** | **0.45%** |
+### Single-Frame Performance Under Varying Key-point Dropouts
 
-Single-frame execution under pure rotational roll configurations introduces standard homographic rank degeneracy, triggering focal-depth scale coupling; however, such perspectives remain highly effective for capturing isolated radial lens distortion. Our cascaded, distortion-first approach resolves this rank bottleneck by extracting $\kappa_1$ via geometric line straightness invariants prior to intrinsic matrix initialization, enabling robust parameter convergence even on single degenerate frames. Individual single-frame geometric defects—such as focal scale ambiguity under heavy cropping or distortion saturation under extreme tilt—are systematically mitigated through a multi-frame consensus loop. Rather than executing a joint point-cloud optimization, the pipeline sequentially estimates a planar homography for each isolated view, maps the resulting projective fields to a unified conic space, and extracts the global camera intrinsics with sub-0.5% accuracy.
+|  Test Case | True Positives (TP) | $f_x$ Solved<br> (% Err) | $f_y$ Solved<br> (% Err) | $c_x$ Solved<br> (% Err) | $c_y$ Solved<br> (% Err) | $\kappa_1$ Solved<br> (% Err) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| `comp_rot_7` | 369 | 1386.55 (**10.92%**) | 1376.77 (**19.72%**) | 958.16 (**0.36%**) | 541.17 (**0.17%**) | -0.2568 (**71.19%**) |
+| `comp_rot_4` | 407 | 1239.62 (**0.83%**)  | 1137.94 (**1.05%**)  | 961.53 (**0.18%**) | 540.33 (**0.25%**) | -0.1420 (**5.30%**)  |
+| `comp_rot_1` | 767 | 1203.90 (**3.69%**)  | 1062.19 (**7.64%**)  | 962.06 (**0.15%**) | 538.89 (**0.38%**) | -0.1316 (**12.25%**) |
+| `comp_rot_0` | 896 | 1295.18 (**3.61%**)  | 1215.90 (**5.73%**)  | 958.70 (**0.33%**) | 538.40 (**0.43%**) | -0.1778 (**18.50%**) |
+| **—** | **—** |  |  |  |  |  |
+| **Mean (3 Best Views)** | **—** | **1246.23 (0.30%)**   | **1138.68 (0.98%)**   | **960.76 (0.44%)** | **539.21 (0.70%)** | **-0.1505 (0.31%)**  |
+| **Series Consensus**   | **—** | **1246.77 (0.26%)**   | **1144.15 (0.51%)**   | **960.19 (0.25%)** | **540.23 (0.26%)** | **-0.1493 (0.45%)**  |
+
+Single-frame execution under pure rotational roll configurations introduces standard homographic rank degeneracy, triggering focal-depth scale coupling; however, such weak perspectivity views remain highly effective for capturing isolated radial lens distortion. Our cascaded, distortion-first approach resolves this rank bottleneck by extracting $\kappa_1$ via geometric line straightness invariants prior to intrinsic matrix initialization, enabling robust parameter convergence even on single degenerate frames. 
+
+Individual single-frame geometric defects are systematically mitigated through a multi-frame consensus loop. Rather than executing a joint point-cloud optimization, the pipeline sequentially estimates a planar homography for each isolated view, maps the resulting projective fields to a unified conic space, and extracts the camera intrinsics with $\approx 0.5\%$ accuracy.
 
 # Strengths, Limitations, and Concluding Remarks
 
 ## Architectural Strengths
+The results prove the practical capability and robustness of the error-correcting hexagonal pattern calibration approach. The straightforward calibration algorithm and modular, single-responsibility component structure enable experiments with different lattice encodings and future extensions.
 
-* **Maximum Theoretical Packing Density:** The hexagonal lattice achieves maximum spatial marker density per unit area, maximizing geometric constraint volume within a single image frame.
-* **Isotropic Crystal Front Propagation:** The 6-neighbor adjacency structure provides optimal topological regularization, allowing uniform lattice growth with inherent protection against neighboring node dropouts.
-* **Unbiased Node Distribution:** The pseudorandom token distribution mimics white noise, suppressing systematic spatial bias during RMSE optimization.
-* **Dense Straight-Line Bundles:** Three-axis geometry generates continuous co-linear point traces at 30° increments, optimizing the performance of plumb-line distortion solvers [@de2011uncalibrated] and Zheng-based vanishing point methods [@zheng2013geometric].
-* **M-Sequence Error Immunity:** Algebraic properties grant native robustness against canvas cropping, random node omissions, and sensor noise [@lin2004error].
-* **Decoupled Calibration:** The pattern topology enables separate phases anchored on first principles: using the projective invariant of straight-line preservation for distortion [@de2011uncalibrated], followed by homography and vanishing point recovery for intrinsics [@zhang2000].
+Camera extrinsic parameters are fully excluded from the calibration process, and the decoupling of distortion and intrinsics makes the algorithm defensive against parameter-coupling issues [@shortis1995isolated]. The framework can provide calibration by a single frame (less precise) or by a sequence. Furthermore, the framework shows high robustness to pattern occlusion, key-point dropouts, and key-point misclassification. Moreover, there is no need for any initial parameter value guesses, which simplifies algorithm usage. The implementation detects degenerate cases and falls back into isotropic focal distance estimation.
 
 ## Limitations
 
-* **Centroid Detection Sensitivity:** Under extreme motion blur or severe sensor noise, contour fragmentation degrades sub-pixel centroid accuracy and shape classification, affecting lattice reconstruction.
 * **Minimal Decoding Block Dimension:** For successful spatial decoding, the framework requires at least an $11 \times 2$ node block footprint with a limited density of omissions and errors.
-* **Error Doubling Effect:** Every node misclassification or recognition dropout leads to a doubled error or erasure in the distilled 1D sequence due to the properties of the local 4-node XOR differential kernels, limiting the overall error-correction capability.
 * **Error Correction Saturation:** Decoding fails if multi-bit errors or consecutive omission bursts violate the underlying error-isolation approach.
 * **Implementation Complexity:** Higher conceptual overhead compared to simple tag-based fiducials, requiring discrete crystal-growth graphs and linear algebra over $\mathbb{GF}(2)$.
 
 ## Conclusion
 
-The B-HGP framework trades a low computational footprint for advanced algebraic resilience and structural robustness. By combining the spatial efficiency of hexagonal lattices with M-sequence noise immunity, it enables independent multi-stage calibration using fundamental geometric invariants. For applications requiring single-frame calibration under severe out-of-plane perspective, lens aberrations, or uncontrolled environments (mobile robotics, autonomous vehicles, industrial photogrammetry), B-HGP provides a compelling alternative to conventional tag-based targets.
+The B-HGP framework fuses error-correcting codes with the structural robustness of a hexagonal grid. By combining the spatial efficiency of hexagonal lattices with M-sequence noise immunity, it enables independent multi-stage calibration using fundamental geometric invariants like vanishing points and absolute conics [@zhang2000flexible; @hartley2003multiple]. For applications requiring single-frame calibration under severe out-of-plane perspective, lens aberrations, or uncontrolled environments (mobile robotics, autonomous vehicles, industrial photogrammetry), B-HGP provides a compelling alternative to conventional tag-based targets. 
 
-
+This approach is not limited to binary sequences of the 5th degree; it is extensible with other primitive polynomials and different lattice configurations. This investigation shows the power of the Galois pattern for practical applications across different computer vision tasks.
 
 # Availability
 
-The open-source implementation, full test suite, Blender benchmark generators, and validation tools are publicly available at: https://github.com/gkis-conda/robust_calibration_pattern
+The open-source implementation, full test suite, Blender benchmark generators, and validation tools are publicly available at: [https://github.com/gkis-conda/robust_calibration_pattern](https://github.com/gkis-conda/robust_calibration_pattern)
+
+**Note:** This software paper documents the implementation of research presented in a draft manuscript under consideration for publication in the *International Journal of Computer Vision* (IJCV) / *Journal of Mathematical Imaging and Vision* (JMIV).
 
 # References
 
----
-
-**Note:** This software paper documents the implementation of research presented in a draft manuscript under consideration for publication in the International Journal of Computer Vision (IJCV).
