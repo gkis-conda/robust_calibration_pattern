@@ -261,7 +261,7 @@ class GridCrystalGrower:
             # Enforce strict Counter-Clockwise (CCW) winding order safely
             vec_ab = p_b - p_a
             vec_ac = p_c - p_a
-            if np.cross(vec_ab, vec_ac) < 0.0:
+            if (vec_ab[0] * vec_ac[1] - vec_ab[1] * vec_ac[0]) < 0.0:
                 idx_b, idx_c = idx_c, idx_b
 
             discovered_triangles.append([idx_a, idx_b, idx_c])
