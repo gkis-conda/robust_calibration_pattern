@@ -71,10 +71,12 @@ $$
 \end{aligned}
 $$
 
-These differential operators perfectly cancel two of the three component sequences, yielding clean, independent 1D M-sequence fragments for subsequent decoding.
+These differential operators perfectly cancel two of the three component sequences, yielding clean, independent 1D M-sequence fragments for subsequent decoding. The underlying polynomials are strictly connected by the hexagonal symmetry of the target topology. If we identify $U$, then $W$ must correspond to $U+1$ in terms of the six available axial directions.
 
 ### 4. Algebraic Binary Sequence Decoding
-Processes each extracted 1D stream through a syndrome decoder pipeline. Single bit-flips are repaired via syndrome evaluation and algebraic locator polynomials [@lin2004error], while recognition dropouts are resolved via a deterministic greedy decoding pass. At this step, two orthogonal axes are matched to the sequence, and the sequence phases are evaluated.
+Processes each extracted 1D stream through a syndrome decoder pipeline that greedily minimizes the resulting error syndrome vector over $\mathbb{GF}(2)$ using a Toeplitz parity-check matrix [@lin2004error]. The algorithm operates sequentially: it first fills missing recognition dropouts (erasures) via a deterministic greedy search pass to minimize the syndrome weight, and subsequently isolates remaining bit-flips by mapping the residual syndrome directly onto the column space of the parity-check matrix. 
+
+During this phase, a bank of six primitive polynomials sequentially attempts to decode the extracted streams. Successful decoding of the first distilled stream uniquely identifies its underlying polynomial index $U$. To eliminate false positives, the second stream extracted from the same buffer is cross-validated against the adjacent polynomial index $U + 1$. Upon successful validation, the recovered 1D sub-sequences are matched directly to the identified master cyclic sequences, evaluating the absolute sub-sequence phases.
 
 ### 5. Coordinate Phase Locking
 Merges resolved phases from independent orthogonal axes to establish absolute global $(r, c)$ matrix indices via the intersection of 1D decoded phases. The exact barycentric-to-matrix mapping restores exact topological axes direction alignment. After phase localization, the separated planar crystals are merged into a common matrix that corresponds to the genuine pattern layout.
@@ -102,7 +104,7 @@ The framework's implementation is modularized into dedicated structural componen
 
 # Experimental Results
 
-The codebase includes comprehensive synthetic benchmarks and Blender 2.92 photorealistic scene generation to systematically analyze tracking performance and structural robustness under severe perspective warping and heavy image noise. We considered two simulated camera configurations: the simple rotation frameset, characterized by an isotropic focal length and camera rolling (from 0° to 300° degrees) supplemented by a tilted image to resolve perspective ambiguity along with a baseline frame; and the compound rotation (random tilt) frameset, where an anisotropic focal length camera generates 8 randomly rotated frames and a baseline frame.
+The codebase includes comprehensive synthetic benchmarks and Blender 2.92 photorealistic scene generation to systematically analyze tracking performance and structural robustness under severe perspective warping and heavy image noise. We considered two simulated camera configurations: the simple frameset, characterized by an isotropic focal length and camera rolling (from 0° to 300° degrees) supplemented by a tilted image to resolve perspective ambiguity along with a baseline frame; and the compound rotation (random tilt) frameset, where an anisotropic focal length camera generates 8 randomly rotated frames and a baseline frame.
 
 ## Pattern Registration Performance
 
@@ -156,7 +158,7 @@ Below, the single-frame estimation results for tilted frames are presented:
 
 ### Single-Frame Performance Under Varying Key-point Dropouts
 
-| Evaluation Test View | True Positives (TP) | $f_x$ Solved<br> (% Err) | $f_y$ Solved<br> (% Err) | $c_x$ Solved<br> (% Err) | $c_y$ Solved<br> (% Err) | $\kappa_1$ Solved<br> (% Err) |
+|  Test Case | True Positives (TP) | $f_x$ Solved<br> (% Err) | $f_y$ Solved<br> (% Err) | $c_x$ Solved<br> (% Err) | $c_y$ Solved<br> (% Err) | $\kappa_1$ Solved<br> (% Err) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
 | `comp_rot_7` | 369 | 1386.55 (**10.92%**) | 1376.77 (**19.72%**) | 958.16 (**0.36%**) | 541.17 (**0.17%**) | -0.2568 (**71.19%**) |
 | `comp_rot_4` | 407 | 1239.62 (**0.83%**)  | 1137.94 (**1.05%**)  | 961.53 (**0.18%**) | 540.33 (**0.25%**) | -0.1420 (**5.30%**)  |
@@ -193,6 +195,7 @@ This approach is not limited to binary sequences of the 5th degree; it is extens
 
 The open-source implementation, full test suite, Blender benchmark generators, and validation tools are publicly available at: [https://github.com/gkis-conda/robust_calibration_pattern](https://github.com/gkis-conda/robust_calibration_pattern)
 
+**Note:** This software paper documents the implementation of research presented in a draft manuscript under consideration for publication in the *International Journal of Computer Vision* (IJCV) / *Journal of Mathematical Imaging and Vision* (JMIV).
+
 # References
 
-**Note:** This software paper documents the implementation of research presented in a draft manuscript under consideration for publication in the *International Journal of Computer Vision* (IJCV) / *Journal of Mathematical Imaging and Vision* (JMIV).
