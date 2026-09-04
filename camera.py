@@ -370,9 +370,7 @@ class ProjectiveCamera:
             local_point = rotation @ [world_point[0],world_point[1], 0] # assume the point is on pattern plane (Z=0)
         else:
             local_point = rotation @ world_point
-        local_point[0] += t[0]
-        local_point[1] += t[1]
-        local_point[2] += t[2]
+        local_point += t.flatten()
         local_point = self.K @ local_point
         x, y = local_point[0]/local_point[2], local_point[1]/local_point[2]
         r = np.hypot(x - self.cx, y - self.cy)
