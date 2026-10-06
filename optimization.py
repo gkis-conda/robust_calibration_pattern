@@ -2,6 +2,9 @@ import numpy as np
 import scipy.optimize
 from camera import ProjectiveCamera
 from lattice_topology import debug_output
+from metrics import compute_kish_weighted_statistics
+import cv2
+
 
 class FrameBundle:
     """
@@ -12,12 +15,14 @@ class FrameBundle:
 
     def __init__(self, topological_matrix: np.ndarray, detected_points: np.ndarray, point_weights: np.array,
                  max_lines_per_axis: int = 8,
-                 min_len: int = 15):
+                 min_len: int = 15,
+                 img_shape: tuple = None):
         self.detected_points = detected_points.copy()
         self.weights = point_weights
         u, v, w, h = _harvest_hexagonal_line_bundles(topological_matrix, N=max_lines_per_axis, MIN_LEN=min_len)
         self.lines = [u, v, w, h]
         self.selected_lines = u + v + w + h
+        self.recall = self._estimate_potential_recall(topological_matrix, img_shape, margin_px=10.)
 
     def undistort_selected(self, cam: ProjectiveCamera) -> np.ndarray:
         """
@@ -52,6 +57,60 @@ class FrameBundle:
         Vw = compute_homogeneous_vanishing_point(w_eqs)
         Vh = compute_homogeneous_vanishing_point(h_eqs)
         return [Vu, Vv, Vw, Vh]
+
+    def _estimate_potential_recall(self, topological_matrix, img_shape: tuple, margin_px: float = 5.0) -> float:
+        """
+        Estimates potential keypoints count in FOV via linear homography
+        from grid (r,c) topology to pixel coordinates (x,y), returning (N_potential, Recall, Mask).
+        """
+        img_h, img_w = img_shape[:2]
+
+        valid_mask = topological_matrix >= 0
+        r_indices, c_indices = np.where(valid_mask)
+        point_ids = topological_matrix[valid_mask]
+
+        if len(point_ids) < 4:
+            return 0.
+
+        detected_rc = np.column_stack([r_indices, c_indices])
+        detected_px = self.detected_points[point_ids]
+
+        # H: (r, c) -> (x_pix, y_pix)
+        H, _ = cv2.findHomography(
+            detected_rc.astype(np.float64),
+            detected_px.astype(np.float64),
+            method=cv2.RANSAC,
+            ransacReprojThreshold=5.0
+        )
+
+        if H is None:
+            return 0.
+
+        num_rows, num_cols = topological_matrix.shape
+        grid_r, grid_c = np.meshgrid(np.arange(num_rows), np.arange(num_cols), indexing='ij')
+        all_rc = np.column_stack([grid_r.ravel(), grid_c.ravel()])  # Shape: (R*C, 2)
+
+        ones = np.ones((len(all_rc), 1), dtype=np.float64)
+        rc = np.hstack([all_rc, ones]).T  # (3, R*C)
+        proj = H @ rc
+
+        valid_z = proj[2, :] > 1e-6
+        u_proj = proj[0, :] / proj[2, :]
+        v_proj = proj[1, :] / proj[2, :]
+
+        # test Bounding Box
+        in_fov = (
+                valid_z &
+                (u_proj >= margin_px) & (u_proj <= (img_w - margin_px)) &
+                (v_proj >= margin_px) & (v_proj <= (img_h - margin_px))
+        ).reshape(num_rows, num_cols)
+
+        n_potential = float(np.sum(in_fov))
+        if n_potential < 1:
+            return 0.0
+        n_detected = float(np.sum(valid_mask & in_fov))
+        recall = (n_detected / n_potential)
+        return recall
 
 
 def menger_curvature_loss(frame: FrameBundle,
@@ -237,6 +296,7 @@ def solve_weak_perspectivity_matrix(vp: list, cx: float, cy: float) -> dict:
                 return {
                     "status": "success", "mode": "perspective",
                     "fx": fx_final, "fy": fy_final,
+                    "isotropic": False,
                     "message": "Full diagonal perspective solved successfully."
                 }
 
@@ -270,6 +330,7 @@ def solve_weak_perspectivity_matrix(vp: list, cx: float, cy: float) -> dict:
         return {
             "status": "success", "mode": "perspective",
             "fx": f_iso_final, "fy": f_iso_final,
+            "isotropic": True,
             "message": "Isotropic constraint successfully extracted the focal scale."
         }
 
@@ -629,7 +690,8 @@ class MultiFrameCalibrator:
     def __init__(self, camera_object: ProjectiveCamera, N: int = 12, MIN_LEN: int = 15):
         """
         camera_object: Baseline master camera instance providing sensor dimensions and state.
-        N, MIN_LEN   : Structural extraction settings passed to the underlying FrameBundle.
+        N, MIN_LEN   : line structural extraction settings passed to the underlying FrameBundle
+            (lines per direction and the min points number
         :return
         status dictionary compatible with camera_io
         """
@@ -654,7 +716,8 @@ class MultiFrameCalibrator:
         Menger curvature, rectifies line tracks, caches the resolved vanishing
         points, and immediately returns the localized tracking state.
         """
-        frame = FrameBundle(topological_matrix, detected_points, point_weights, max_lines_per_axis=self.N, min_len=self.MIN_LEN)
+        frame = FrameBundle(topological_matrix, detected_points,
+                            point_weights, max_lines_per_axis=self.N, min_len=self.MIN_LEN, img_shape=self.img_shape)
 
         if len(frame.selected_lines) < 5:
             print(" -> [Warning] Skipping added frame: insufficient lines.")
@@ -752,6 +815,112 @@ class MultiFrameCalibrator:
             "fx": final_cam.fx_px, "fy": final_cam.fy_px,
             "cx": final_cam.cx, "cy": final_cam.cy,
             "radial_k1_ap": mean_k1_ap, "k1": final_cam.k1
+        }
+
+    def statistics(self) -> dict:
+        """
+        camera framewise calibration precision statistics. Evaluates single-frame estimates with Kish's
+        weighted confidence intervals and compares against joint multi-frame consensus.
+        """
+        if len(self.frames) < 3:
+            print(" -> [ERROR] Statistics aborted: Accumulator cache buffer contains not enough frames.")
+            return {
+                "status": "failed",
+                "message": "Not enough frames in cache buffer."
+            }
+
+        print(f"\n -> Finalizing Multi-Frame Calibration: Processing {len(self.frames)} pooled views...")
+
+        r_ap = self.master_cam.aperture_radius()
+
+        single_frame_params = []  # [fx, fy, k1, cx, cy, k1_ap]
+        frame_weights = []
+        frame_type = []
+        isotropic_n = 0
+        for frame, cx, cy, k1_ap in zip(self.frames, self.cached_cx, self.cached_cy, self.cached_k1_ap):
+
+            aperture_cam = ProjectiveCamera(
+                self.img_shape, r_ap, r_ap,
+                cx, cy, k1_ap, self.master_cam.mode
+            )
+            vanishing_points = frame.estimate_vp(aperture_cam)
+            zhang_res = solve_weak_perspectivity_matrix(vanishing_points, cx=cx, cy=cy)
+
+            if zhang_res["status"] != "success":
+                print(f" -> [ERROR] Matrix solver failed to resolve structural constraints: {zhang_res['message']}")
+                continue
+
+            final_mode = zhang_res["mode"]
+            isotropic = zhang_res.get("isotropic", False)
+            if final_mode == "perspective":
+                fx_px = zhang_res["fx"]
+                fy_px = zhang_res["fy"]
+                if isotropic:
+                    isotropic_n += 1
+            else:
+                print(" -> [INFO] Weak-perspectivity identified. Skip.")
+                continue
+
+            mean_k1_ap = np.mean(k1_ap)
+            final_cam = ProjectiveCamera(self.img_shape, fx_px, fy_px, cx, cy)
+            k1 = final_cam.convert_aperture_to_focal(mean_k1_ap)
+
+            single_frame_params.append([fx_px, fy_px, k1, cx, cy, k1_ap])
+            frame_type.append(zhang_res.get("isotropic", False))
+            frame_weights.append(getattr(frame, "recall", 1.0))
+
+        valid_n = len(single_frame_params)
+        if valid_n < 2:
+            print(" -> [ERROR] Insufficient valid single-frame estimates after outlier rejection.")
+            return {"status": "failed", "message": "Too few valid frames for statistical evaluation."}
+
+        ISO_THRESHOLD = 0.4
+        isotrotic_camera = ISO_THRESHOLD < isotropic_n / valid_n
+        theta_samples = []
+        theta_weights = []
+
+        for i in range(valid_n):
+            fx_px, fy_px, k1, cx, cy, k1_ap = single_frame_params[i]
+            isotropic = frame_type[i]
+            w = frame_weights[i]
+            if isotrotic_camera:
+                f_iso = (2.0 * fx_px * fy_px) / (fx_px + fy_px)
+                theta_samples.append([f_iso, k1, cx, cy, k1_ap])
+                theta_weights.append(w)
+            elif not isotropic:
+                theta_samples.append([fx_px, fy_px, k1, cx, cy, k1_ap])
+                theta_weights.append(w)
+
+        stat_res = compute_kish_weighted_statistics(np.array(theta_samples), np.array(theta_weights), alpha=0.05)
+        if isotrotic_camera:
+            f, k1, cx, cy, k1_ap = stat_res["mean"]
+            fx_px, fy_px = f, f
+        else:
+            fx_px, fy_px, k1, cx, cy, k1_ap = stat_res["mean"]
+        final_cam = ProjectiveCamera(self.img_shape, fx_px, fy_px, cx, cy)
+        k1 = final_cam.convert_aperture_to_focal(k1_ap)
+
+        param_names = ["fx (px)", "fy (px)", "k1", "cx", "cy", "k1_ap"]
+        print(f"\n ================= SINGLE-FRAME WEIGHTED CONSENSUS STATS (N={stat_res['n_raw']}) =================")
+        print(f" Effective Sample Size (N_eff) : {stat_res['n_eff']:.3f}")
+        print(f" Effective Degrees of Freedom  : {stat_res['dof']:.3f}")
+        print(f" Final weighted distortion k1: {k1:.3f}")
+        print("-" * 75)
+        for j, name in enumerate(param_names):
+            m = stat_res["mean"][j]
+            err = stat_res["ci_margin"][j]
+            low = stat_res["ci_lower"][j]
+            high = stat_res["ci_upper"][j]
+            std = stat_res["std"][j]
+            print(
+                f" {name:<12} | Mean: {m:10.4f} | Std: {std:8.4f} | 95% CI: [{low:10.4f}, {high:10.4f}] (+/-{err:7.4f})")
+        print("=" * 75)
+
+        return {
+            "status": "success",
+            "names": param_names,
+            "single_view_stats": stat_res,
+            "valid_frames_count": valid_n
         }
 
 

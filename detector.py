@@ -408,6 +408,8 @@ if __name__ == "__main__":
     parser.add_argument("-i", "--input", type=str, required=True, help="Input image file path OR dataset directory.")
     parser.add_argument("-o", "--output", type=str, default="", help="Output file path.")
     parser.add_argument("-C", "--calibrate", action='store_true', help="Perform focal distance and k1 calibration")
+    parser.add_argument("-S", "--statistics", action='store_true',
+                        help="Perform isolated calibration and interval statistics estimation")
     parser.add_argument("--save-images", action="store_true", help="Save debug images")
     parser.add_argument("-V", "--verbose", action="store_true", help="Add debug output to console")
 
@@ -442,30 +444,32 @@ if __name__ == "__main__":
         print("[Error] Image queue is empty. Stop", file=sys.stderr)
         sys.exit(1)
 
+    # Load standard config context template from your module profiles based on the first item profile
+    baseline_cam = camera_io.find_camera_config(target_image_files[0], load=True)
+    if baseline_cam is None:
+        img = cv2.imread(target_image_files[0])
+        h, w = img.shape[:2]
+    else:
+        w, h = baseline_cam.img_shape
+    # some reasonable camera initialization
+    initial_cam = ProjectiveCamera((w, h), fx_px=w/2, fy_px=w/2, cx=w/2, cy=h/2, k1=-0.1)
+    calibrator = MultiFrameCalibrator(camera_object=initial_cam, N=12, MIN_LEN=15)
+
+    if not args.calibrate:
+        print("[Info]Calibration flags deactivated (-C absent). Executing structural grid logging tracks only.")
+
+    for file_path in target_image_files:
+        print(f"\n--- Processing: {os.path.basename(file_path)} ---")
+        frame_extraction_result = process_image(file_path, args.save_images)
+
+        if frame_extraction_result is not None and (args.calibrate or args.statistics):
+            calibrator.add_frame(
+                topological_matrix=frame_extraction_result["topological_matrix"],
+                detected_points=frame_extraction_result["points"],
+                point_weights=1./np.array(frame_extraction_result["sizes"])
+            )
+
     if args.calibrate:
-        # Load standard config context template from your module profiles based on the first item profile
-        baseline_cam = camera_io.find_camera_config(target_image_files[0], load=True)
-        if baseline_cam is None:
-            img = cv2.imread(target_image_files[0])
-            h, w = img.shape[:2]
-        else:
-            w, h = baseline_cam.img_shape
-        initial_cam = ProjectiveCamera((w, h), fx_px=w/2, fy_px=w/2, cx=w/2, cy=h/2, k1=-0.1)
-        # Instantiate your new stateful multi-view accumulator container instance
-        calibrator = MultiFrameCalibrator(camera_object=initial_cam, N=12, MIN_LEN=15)
-
-        for file_path in target_image_files:
-            print(f"\n--- Processing: {os.path.basename(file_path)} ---")
-            frame_extraction_result = process_image(file_path, args.save_images)
-
-            if frame_extraction_result is not None:
-                calibrator.add_frame(
-                    topological_matrix=frame_extraction_result["topological_matrix"],
-                    detected_points=frame_extraction_result["points"],
-                    point_weights=1./np.array(frame_extraction_result["sizes"])
-                )
-
-        # Trigger your smart polymorphic calibration routine (natively splits 1-view vs multi-view matrix models!)
         final_calibration_dict = calibrator.calibrate()
         print("\n--- FINAL CALIBRATION SUMMARY ---")
         print(final_calibration_dict)
@@ -475,9 +479,6 @@ if __name__ == "__main__":
                 print("\n--- GROUND TRUTH INTRINSICS ---")
                 print(camera_io.serialize_camera_to_dict(baseline_cam))
                 camera_io.save_camera_comparison_md(input_path, result_cam, baseline_cam)
-    else:
-        # If calibration flags remain unchecked, execute pure standalone low-level topological mapping loops
-        print(" -> Calibration flags deactivated (-C absent). Executing structural grid logging tracks only.")
-        for file_path in target_image_files:
-            print(f"\n--- Processing: {os.path.basename(file_path)} ---")
-            process_image(file_path)
+
+    if args.statistics:
+        final_statistics_dict = calibrator.statistics()
