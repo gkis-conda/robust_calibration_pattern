@@ -1,5 +1,16 @@
 import numpy as np
 import cv2
+from detector import detect_and_classify_grid_nodes
+from scipy.spatial import KDTree
+from typing import Any, Dict, List, Optional, Tuple
+
+
+def generate_opencv_unary_blueprint(rows, cols):
+    """
+    OpenCV's cv2.findCirclesGrid demands a pristine array where every node is an identical
+    circle tracking element (0). Missing cells or token variances crash the OpenCV graph solver.
+    """
+    return np.zeros((rows, cols), dtype=np.int32)
 
 # ==============================================================================
 # SECTION 1: BLENDER 2.92 GENERATOR INTERFACE (Plugs into rendering script)
@@ -95,7 +106,6 @@ class OpenCVCirclesGridMeshGenerator:
 # ==============================================================================
 # SECTION 2: PYTHON 3.6 DETECTOR INTERFACE (Plugs into validation framework)
 # ==============================================================================
-from detector import detect_and_classify_grid_nodes
 class ContourDetector(cv2.Feature2D):
    def __init__(self, min_area=15, max_area=5000, edge_margin_px=2):
         super().__init__()
@@ -111,10 +121,6 @@ class ContourDetector(cv2.Feature2D):
             keypoints.append(cv2.KeyPoint(float(pt[0]), float(pt[1]), float(size),-1.0, 0.0, 0, int(id)))
         print("Call success")
         return np.array(keypoints)
-
-
-import numpy as np
-from scipy.spatial import KDTree
 
 
 def filter_grid_outliers(pts, labels, sizes, threshold_sigma=2.5):
@@ -278,3 +284,162 @@ class OpenCVGridDetector:
 
         return result
 
+
+class OpenCVMultiFrameCalibrator:
+    """OpenCV calibration wrapper matching the MultiFrameCalibrator interface."""
+
+    def __init__(
+        self,
+        camera_object: Any,
+        geometry_generator: Any,
+        fix_k3: bool = True,
+        fix_principal_point: bool = False,
+        use_intrinsic_guess: bool = True,
+    ) -> None:
+        """Initialize OpenCV calibrator wrapper.
+
+        Args:
+            camera_object: Initial ProjectiveCamera instance providing image size and K guess.
+            geometry_generator: Object implementing get_shape_center(r, c) for 3D mapping.
+            fix_k3: Whether to lock k3 coefficient to zero during optimization.
+            fix_principal_point: Whether to lock principal point (cx, cy) to initial guess.
+            use_intrinsic_guess: Whether to initialize solver from camera_object intrinsics.
+        """
+        self.camera = camera_object
+        self.generator = geometry_generator
+        self.fix_k3 = fix_k3
+        self.fix_principal_point = fix_principal_point
+        self.use_intrinsic_guess = use_intrinsic_guess
+
+        self.object_points_views: List[np.ndarray] = []
+        self.image_points_views: List[np.ndarray] = []
+        self.init_rvecs: List[np.ndarray] = []
+        self.init_tvecs: List[np.ndarray] = []
+
+    def add_frame(
+        self,
+        topological_matrix: np.ndarray,
+        detected_points: np.ndarray,
+        point_weights: Optional[np.ndarray] = None,
+        initial_pose: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+    ) -> None:
+        """Register a single frame correspondences from topological grid matrix.
+
+        Args:
+            topological_matrix: 2D array of shape (H_nodes, W_nodes) mapping grid (r, c)
+                                to index in detected_points (< 0 indicates missing node).
+            detected_points: 2D array of shape (N, 2) with detected pixel coordinates.
+            point_weights: Unused in OpenCV backend; kept for strict interface parity.
+            initial_pose: Optional (R, t) tuple to initialize extrinsics for this view.
+        """
+        h_nodes, w_nodes = topological_matrix.shape
+        obj_pts: List[List[float]] = []
+        img_pts: List[List[float]] = []
+
+        for r in range(h_nodes):
+            for c in range(w_nodes):
+                pt_idx = int(topological_matrix[r, c])
+                if pt_idx < 0:
+                    continue
+
+                x,y = self.generator.get_shape_center(r, c)
+                obj_pts.append([x, y, 0])
+                img_pts.append(detected_points[pt_idx])
+
+        if len(obj_pts) < 4:
+            return
+
+        self.object_points_views.append(np.array(obj_pts, dtype=np.float32))
+        self.image_points_views.append(np.array(img_pts, dtype=np.float32))
+
+        if initial_pose is not None:
+            R_init, t_init = initial_pose
+            rvec, _ = cv2.Rodrigues(np.asarray(R_init, dtype=np.float32))
+            self.init_rvecs.append(rvec.astype(np.float32))
+            self.init_tvecs.append(np.asarray(t_init, dtype=np.float32).reshape(3, 1))
+
+    def calibrate(self, max_valid_rms: float = 50.0) -> Dict[str, Any]:
+        """Run OpenCV Levenberg-Marquardt optimization with convergence safeguards.
+
+        Args:
+            max_valid_rms: Threshold above which calibration is considered diverged.
+
+        Returns:
+            Dictionary formatted for camera_io.deserialize_camera_from_dict.
+        """
+        if len(self.object_points_views) < 2:
+            return {"status": "failed", "reason": "Insufficient frames for OpenCV calibration"}
+
+        img_size = (int(self.camera.width), int(self.camera.height))
+
+        try:
+            if self.use_intrinsic_guess:
+                k_matrix = np.array(
+                    [
+                        [float(self.camera.fx_px), 0.0, float(self.camera.cx)],
+                        [0.0, float(self.camera.fy_px), float(self.camera.cy)],
+                        [0.0, 0.0, 1.0],
+                    ],
+                    dtype=np.float32,
+                )
+                dist_coeffs = np.zeros(5, dtype=np.float32)
+            else:
+                k_matrix = cv2.initCameraMatrix2D(
+                    self.object_points_views, self.image_points_views, img_size, aspectRatio=1.0
+                )
+                dist_coeffs = np.zeros(5, dtype=np.float32)
+
+            flags = 0
+            if self.use_intrinsic_guess:
+                flags |= cv2.CALIB_USE_INTRINSIC_GUESS
+            if self.fix_k3:
+                flags |= cv2.CALIB_FIX_K3
+            if self.fix_principal_point:
+                flags |= cv2.CALIB_FIX_PRINCIPAL_POINT
+
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 500, 1e-12)
+
+            has_all_poses = len(self.init_rvecs) == len(self.object_points_views)
+            rvecs_arg = self.init_rvecs if has_all_poses else None
+            tvecs_arg = self.init_tvecs if has_all_poses else None
+
+            rms, k_est, dist_est, _, _ = cv2.calibrateCamera(
+                objectPoints=self.object_points_views,
+                imagePoints=self.image_points_views,
+                imageSize=img_size,
+                cameraMatrix=k_matrix,
+                distCoeffs=dist_coeffs,
+                rvecs=rvecs_arg,
+                tvecs=tvecs_arg,
+                flags=flags,
+                criteria=criteria,
+            )
+        except cv2.error as exc:
+            return {"status": "failed", "reason": f"OpenCV solver exception: {str(exc)}"}
+
+        fx_val = float(k_est[0,0])
+        fy_val = float(k_est[1,1])
+
+        # Check physical validity and convergence threshold
+        if not np.isfinite(rms) or rms > max_valid_rms or fx_val <= 0.0 or fy_val <= 0.0:
+            return {
+                "status": "failed",
+                "reason": f"OpenCV diverged (rms={rms:.2f}, fx={fx_val:.1f}, fy={fy_val:.1f})",
+            }
+
+        d_flat = dist_est.flatten()
+        return {
+            "status": "success",
+            "width": img_size[0],
+            "height": img_size[1],
+            "fx": fx_val,
+            "fy": fy_val,
+            "cx": float(k_est[0,2]),
+            "cy": float(k_est[1,2]),
+            "rms": float(rms),
+            "distortion_model": "BrownConradyFull",
+            "k1": float(d_flat[0]),
+            "k2": float(d_flat[1]),
+            "p1": float(d_flat[2]),
+            "p2": float(d_flat[3])
+        }

@@ -70,9 +70,7 @@ def deserialize_camera_from_dict(d):
     if "img_shape" in d:
         img_shape = _as_tuple_shape(d["img_shape"])
     else:
-        img_shape = _as_tuple_shape({"W_img": d.get("W_img"), "H_img": d.get("H_img")})
-        if img_shape is None:
-            img_shape = _as_tuple_shape({"width": d.get("width"), "height": d.get("height")})
+        img_shape = _as_tuple_shape(d)
 
     if img_shape is None:
         raise TypeError("Raser shape missed")
@@ -116,27 +114,13 @@ def deserialize_camera_from_dict(d):
     if cy is None:
         cy = float(H_img) / 2.0
 
-    # Distortion handling: prefer explicit k1, else look for lists 'dist' or 'dist_coeffs'.
-    k1 = 0.0
-    distortion_model = None
-
-    if "k1" in d:
-        try:
-            k1 = float(d["k1"])
-            if abs(k1) <= 1e-12:
-                k1 = 0.0
-            else:
-                distortion_model = d.get("distortion_model", None)
-        except Exception:
-            k1 = 0.0
-            distortion_model = None
-
     mode = d.get("mode", "perspective")
-
+    distortion_model = d.get("distortion_model", None)
+    distortion_coefs = d
     return ProjectiveCamera((W_img, H_img),
                            float(fx), float(fy),
                            float(cx), float(cy),
-                           float(k1),
+                           None, distortion_coefs,
                            mode,
                            distortion_model=distortion_model)
 

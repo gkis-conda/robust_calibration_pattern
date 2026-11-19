@@ -4,6 +4,7 @@ from camera import ProjectiveCamera
 from lattice_topology import debug_output
 from metrics import compute_kish_weighted_statistics
 import cv2
+from typing import Sequence
 
 
 class FrameBundle:
@@ -25,22 +26,16 @@ class FrameBundle:
         self.recall = self._estimate_potential_recall(topological_matrix, img_shape, margin_px=10.)
 
     def undistort_selected(self, cam: ProjectiveCamera) -> np.ndarray:
-        """
-        Natively executes lazy, single-pass point undistortion strictly for
-        the nodes present in the selected line bundles under the current cam state.
-        """
+        """Execute batch point undistortion for unique nodes via camera interface."""
         u_points = self.detected_points.copy()
-        processed = np.zeros(len(self.detected_points), dtype=np.uint8)
+        if not self.selected_lines:
+            return u_points
 
-        for line in self.selected_lines:
-            n_pts = len(line)
-            for i in range(n_pts):
-                idx = line[i]
-                if processed[idx]:
-                    continue
-                processed[idx] = 1
-                u_points[idx] = cam.undistort(u_points[idx])
+        unique_idx = np.unique(np.concatenate(self.selected_lines))
+        if unique_idx.size == 0:
+            return u_points
 
+        u_points[unique_idx] = cam.undistort_points(u_points[unique_idx])
         return u_points
 
     def estimate_vp(self, cam:ProjectiveCamera)-> list:
@@ -112,6 +107,41 @@ class FrameBundle:
         recall = (n_detected / n_potential)
         return recall
 
+    def triplets(
+        self, step: int = 2
+    ) -> tuple:
+        """Build and cache flat triplet index arrays and summed weights for the whole frame."""
+        if step in self._triplets_cache:
+            return self._triplets_cache[step]
+
+        p1_list, p2_list, p3_list = [], [], []
+        for line in self.selected_lines:
+            n_pts = len(line)
+            if n_pts <= 2 * step:
+                continue
+            p1_list.append(line[0 : n_pts - 2 * step])
+            p2_list.append(line[step : n_pts - step])
+            p3_list.append(line[2 * step : n_pts])
+
+        if not p1_list:
+            self._triplets_cache[step] = None
+            return None
+
+        idx_p1 = np.concatenate(p1_list)
+        idx_p2 = np.concatenate(p2_list)
+        idx_p3 = np.concatenate(p3_list)
+
+        if self.weights is None:
+            triplet_weights = None
+        else:
+            triplet_weights = (
+                self.weights[idx_p1] + self.weights[idx_p2] + self.weights[idx_p3]
+            )
+
+        cached = (idx_p1, idx_p2, idx_p3, triplet_weights)
+        self._triplets_cache[step] = cached
+        return cached
+
 
 def menger_curvature_loss(frame: FrameBundle,
                           cam: ProjectiveCamera, loss="menger", step=2) -> float:
@@ -128,9 +158,9 @@ def menger_curvature_loss(frame: FrameBundle,
         n_pts = len(line)
 
         # Extract node indices blocks for triplets using slices
-        idx_p1 = line[0 : n_pts - 2 * step]
-        idx_p2 = line[step : n_pts - step]
-        idx_p3 = line[2 * step : n_pts]
+        idx_p1 = line[0: n_pts - 2 * step]
+        idx_p2 = line[step: n_pts - step]
+        idx_p3 = line[2 * step: n_pts]
 
         p1 = u_points[idx_p1]
         p2 = u_points[idx_p2]
@@ -158,6 +188,45 @@ def menger_curvature_loss(frame: FrameBundle,
             total_loss += np.sum(line_weights * abs_cross / denom)
 
     return total_loss
+
+
+def pooled_menger_curvature_loss(
+    frames: Sequence[FrameBundle],
+    cam: ProjectiveCamera,
+    loss: str = "menger",
+    step: int = 2) -> float:
+    """Compute average Menger curvature loss across a sequence of FrameBundle instances.
+
+    Args:
+        frames: Sequence of FrameBundle objects collected across multiple views.
+        cam: Candidate ProjectiveCamera instance used to undistort points.
+        loss: Curvature metric type ('menger' or inscribed radius).
+        step: Index stride between triplet points along each line.
+
+    Returns:
+        Mean curvature loss across all non-empty frames in the pool.
+    """
+    if not frames:
+        return 0.0
+
+    total_pool_loss = 0.0
+    valid_frames = 0
+
+    for frame in frames:
+        if not frame.selected_lines:
+            continue
+        total_pool_loss += menger_curvature_loss(
+            frame=frame,
+            cam=cam,
+            loss=loss,
+            step=step
+        )
+        valid_frames += 1
+
+    if valid_frames == 0:
+        return 0.0
+
+    return float(total_pool_loss / valid_frames)
 
 
 def compute_homogeneous_line(line_indices: list, points_2d: np.ndarray) -> np.ndarray:
@@ -519,6 +588,249 @@ def solve_multi_frame_zhang_matrix(multi_frame_vps: list, cx: float, cy: float) 
         "mode": "degenerate",
         "message": "Projective perspective matrix components degraded into absolute rank-deficiency."
     }
+
+
+def solve_multi_frame_zhang(
+    multi_frame_vps: list,
+    cx_init: float,
+    cy_init: float,
+    solve_principal_point: bool = True,
+) -> dict:
+    """
+    Multi-Frame Joint Zhang Engine with optional full 4-DOF recovery (fx, fy, cx, cy).
+
+    1. Computes local line homographies H_k independently per frame via local SVD
+       centered at (cx_init, cy_init) for numerical conditioning.
+    2. Pools verified perspective views into a 5-DOF Absolute Conic system (B12=0)
+       to solve true optical center (cx, cy) decoupled from distortion center.
+    3. Falls back smoothly to 2-DOF diagonal or 1-DOF isotropic solvers if rank-deficient.
+    """
+    if multi_frame_vps is None or len(multi_frame_vps) < 1:
+        return {
+            "status": "failed",
+            "message": "Inbound multi-view tracking arrays contain no valid entries.",
+        }
+
+    V_full = []
+    M_diag = []
+    N_diag = []
+    M_iso = []
+    N_iso = []
+
+    model_directions = get_model_directions()
+    G_MIN_BOUND = 1.0 / (MAX_PHYSICAL_FOCAL_PX ** 2)
+    G_MAX_BOUND = 1.0 / (MIN_PHYSICAL_FOCAL_PX ** 2)
+
+    for frame_idx, vp in enumerate(multi_frame_vps):
+        if vp is None:
+            continue
+
+        A_rows = []
+        # 1. Center and normalize homogeneous vanishing points onto the unit sphere
+        for i in range(4):
+            v = vp[i]
+            if v is None:
+                continue
+
+            x, y, w = float(v[0]), float(v[1]), float(v[2])
+            xc = x - cx_init * w
+            yc = y - cy_init * w
+            v_norm = 1./np.sqrt(xc * xc + yc * yc + w * w)
+            xn, yn, wn = xc * v_norm, yc * v_norm, w * v_norm
+            dx, dy = model_directions[i]
+            weight = abs(wn)
+            A_rows.append([wn * dx * weight, wn * dy * weight, 0.0, 0.0, -xn * dx * weight, -xn * dy * weight])
+            A_rows.append([0.0, 0.0, wn * dx * weight, wn * dy * weight, -yn * dx * weight, -yn * dy * weight])
+
+        if len(A_rows) < 5:
+            continue
+
+        A_dlt = np.array(A_rows, dtype=np.float64)
+        _, _, vh = np.linalg.svd(A_dlt)
+        h11, h12, h21, h22, h31, h32 = vh[-1]
+
+        # Local 2-DOF check for perspective rank filtering
+        m11 = h11 * h12
+        m12 = h21 * h22
+        m21 = h11 * h11 - h12 * h12
+        m22 = h21 * h21 - h22 * h22
+
+        n1 = -h31 * h32
+        n2 = h32 * h32 - h31 * h31
+
+        det_M = m11 * m22 - m12 * m21
+        is_frame_perspective = False
+        if abs(det_M) > MIN_PERSPECTIVE_DET_MAGNITUDE:
+            M_local = np.array([[m11, m12], [m21, m22]], dtype=np.float64)
+            N_local = np.array([n1, n2], dtype=np.float64)
+            try:
+                g_local = np.linalg.solve(M_local, N_local).flatten()
+                gx, gy = float(g_local[0]), float(g_local[1])
+                if G_MIN_BOUND < gx < G_MAX_BOUND and G_MIN_BOUND < gy < G_MAX_BOUND:
+                    fx_loc = np.sqrt(1.0 / gx)
+                    fy_loc = np.sqrt(1.0 / gy)
+                    if MIN_PIXEL_ASPECT_RATIO < (fx_loc / fy_loc) < MAX_PIXEL_ASPECT_RATIO:
+                        is_frame_perspective = True
+            except np.linalg.LinAlgError:
+                pass
+
+        frob_norm_M = np.sqrt(m11 * m11 + m12 * m12 + m21 * m21 + m22 * m22)
+        scale = 1.0 / frob_norm_M
+        dot_h1_h2 = h11 * h12 + h21 * h22
+        norm_h1 = h11 * h11 + h21 * h21
+        norm_h2 = h12 * h12 + h22 * h22
+
+        M_iso.append([n1 * scale])
+        M_iso.append([n2 * scale])
+        N_iso.append(dot_h1_h2 * scale)
+        N_iso.append((norm_h1 - norm_h2) * scale)
+
+        if is_frame_perspective:
+            M_diag.append([m11 * scale, m12 * scale])
+            M_diag.append([m21 * scale, m22 * scale])
+            N_diag.append(n1 * scale)
+            N_diag.append(n2 * scale)
+
+            # Full 5-DOF IAC equations: b = [B11, B22, B13, B23, B33]
+            row1 = [
+                h11 * h12,
+                h21 * h22,
+                h11 * h32 + h31 * h12,
+                h21 * h32 + h31 * h22,
+                h31 * h32,
+            ]
+            row2 = [
+                h11 * h11 - h12 * h12,
+                h21 * h21 - h22 * h22,
+                2.0 * (h11 * h31 - h12 * h32),
+                2.0 * (h21 * h31 - h22 * h32),
+                h31 * h31 - h32 * h32,
+            ]
+            r1_norm = np.linalg.norm(row1) + 1e-12
+            r2_norm = np.linalg.norm(row2) + 1e-12
+            V_full.append([val / r1_norm for val in row1])
+            V_full.append([val / r2_norm for val in row2])
+        else:
+            print(f" -> [INFO] Frame {frame_idx} dropped from joint pool due to flat affine degeneracy.")
+
+    if len(N_iso) < 2:
+        return {
+            "status": "failed",
+            "message": "Multi-view constraint matrix degraded.",
+        }
+
+    # --- 1. FULL 4-DOF RECOVERY (fx, fy, cx, cy) ---
+    if solve_principal_point and len(V_full) >= 6:
+        try:
+            V_mat = np.array(V_full, dtype=np.float64)
+            _, _, Vt = np.linalg.svd(V_mat)
+            B11, B22, B13, B23, B33 = Vt[-1, :]
+
+            if B11 < 0.0:
+                B11, B22, B13, B23, B33 = -B11, -B22, -B13, -B23, -B33
+
+            if B11 > 1e-12 and B22 > 1e-12:
+                dx_opt = -B13 / B11
+                dy_opt = -B23 / B22
+                num = B33 - (B13 * B13) / B11 - (B23 * B23) / B22
+
+                if num > 0.0:
+                    fx_full = float(np.sqrt(num / B11))
+                    fy_full = float(np.sqrt(num / B22))
+                    cx_full = float(cx_init + dx_opt)
+                    cy_full = float(cy_init + dy_opt)
+
+                    valid_focal = (
+                        MIN_PHYSICAL_FOCAL_PX < fx_full < MAX_PHYSICAL_FOCAL_PX
+                        and MIN_PHYSICAL_FOCAL_PX < fy_full < MAX_PHYSICAL_FOCAL_PX
+                    )
+                    valid_aspect = MIN_PIXEL_ASPECT_RATIO < (fx_full / fy_full) < MAX_PIXEL_ASPECT_RATIO
+                    valid_shift = abs(dx_opt) < 150.0 and abs(dy_opt) < 150.0
+
+                    if valid_focal and valid_aspect and valid_shift:
+                        print(
+                            f" -> [SUCCESS] Full 4-DOF Zhang calibration fx: {fx_full:.2f}, fy: {fy_full:.2f}, "
+                            f"cx: {cx_full:.2f}, cy: {cy_full:.2f} over {len(V_full) // 2} views."
+                        )
+                        return {
+                            "status": "success",
+                            "mode": "perspective",
+                            "fx": fx_full,
+                            "fy": fy_full,
+                            "cx": cx_full,
+                            "cy": cy_full,
+                            "message": "Multi-view full 4-DOF solved successfully.",
+                        }
+        except Exception:
+            pass
+
+    # --- 2. OVERDETERMINED ASYMMETRIC RECOVERY (gx, gy with fixed cx_init, cy_init) ---
+    if len(N_diag) > 2:
+        try:
+            M_diag_global = np.array(M_diag, dtype=np.float64)
+            N_diag_global = np.array(N_diag, dtype=np.float64).flatten()
+            g, _, _, _ = np.linalg.lstsq(M_diag_global, N_diag_global, rcond=None)
+            g = g.flatten()
+            gx, gy = float(g[0]), float(g[1])
+
+            if G_MIN_BOUND < gx < G_MAX_BOUND and G_MIN_BOUND < gy < G_MAX_BOUND:
+                fx_final = float(np.sqrt(1.0 / gx))
+                fy_final = float(np.sqrt(1.0 / gy))
+
+                if MIN_PIXEL_ASPECT_RATIO < (fx_final / fy_final) < MAX_PIXEL_ASPECT_RATIO:
+                    print(
+                        f" -> [SUCCESS] Joint Zhang calibration fx: {fx_final:.2f}, fy: {fy_final:.2f} "
+                        f"over {len(N_diag) // 2} views."
+                    )
+                    return {
+                        "status": "success",
+                        "mode": "perspective",
+                        "fx": fx_final,
+                        "fy": fy_final,
+                        "cx": float(cx_init),
+                        "cy": float(cy_init),
+                        "message": "Multi-view diagonal solved successfully.",
+                    }
+        except Exception:
+            pass
+
+    # --- 3. ISOTROPIC FALLBACK ---
+    print(f" -> fx<>fy case has unstable solution. Running Isotropic fx=fy=f on {len(N_iso) // 2} views...")
+    M_iso_global = np.array(M_iso, dtype=np.float64)
+    N_iso_global = np.array(N_iso, dtype=np.float64).flatten()
+    try:
+        g_iso, _, _, _ = np.linalg.lstsq(M_iso_global, N_iso_global, rcond=None)
+        f2 = float(g_iso.flatten()[0])
+
+        if f2 < 0.0:
+            g_iso_neg, _, _, _ = np.linalg.lstsq(M_iso_global, -N_iso_global, rcond=None)
+            f2 = float(g_iso_neg.flatten()[0])
+
+        F2_MAX_BOUND = MAX_PHYSICAL_FOCAL_PX ** 2
+        F2_MIN_BOUND = MIN_PHYSICAL_FOCAL_PX ** 2
+        if F2_MIN_BOUND < f2 < F2_MAX_BOUND:
+            f_iso_final = float(np.sqrt(f2))
+            print(f" -> Uniform fx=fy calibration f: {f_iso_final:.2f} px.")
+            return {
+                "status": "success",
+                "mode": "perspective",
+                "fx": f_iso_final,
+                "fy": f_iso_final,
+                "cx": float(cx_init),
+                "cy": float(cy_init),
+                "message": "Multi-view isotropic solved successfully.",
+            }
+    except Exception:
+        pass
+
+    print(" -> Multi-view planar degeneracy encountered.")
+    return {
+        "status": "failed",
+        "mode": "degenerate",
+        "message": "Projective perspective matrix components degraded into absolute rank-deficiency.",
+    }
+
+
 #
 # ==========================================================================================================
 # Radial distortion estimators
@@ -538,18 +850,19 @@ def strategy_nelder_mead(frame: FrameBundle, master_cam: ProjectiveCamera, coars
 
     # Anchor points map strictly to the exact physical mid-points of our search intervals.
     BARREL_K1_RANGE = 0.7
-    k1_mid = -BARREL_K1_RANGE/2
-    k1_radius = abs(k1_mid) - 1.e-6
 
     # Center tracking boundaries are locked to a fixed 20x20px envelope around the true image sensor center
     cx_mid = master_cam.cx
     cy_mid = master_cam.cy
-    delta_c = 10.
     loss_type = "menger"
-    step = 2
-    if not coarse:
+    if coarse:
+        delta_c = 10.
+        step = 2
+        k1_mid = -BARREL_K1_RANGE / 2
+        k1_radius = abs(k1_mid) - 1.e-6
+    else:
         k1_mid = master_cam.k1
-        k1_radius *= 0.1
+        k1_radius = ( abs(k1_mid) - 1.e-6 ) * 0.1
         delta_c = 3
         step = 3
 
@@ -565,7 +878,7 @@ def strategy_nelder_mead(frame: FrameBundle, master_cam: ProjectiveCamera, coars
         modified_cam = ProjectiveCamera(
             img_shape=img_shape,
             fx_px=r_ap, fy_px=r_ap,
-            cx=cx_cand, cy=cy_cand, k1=k1_ap_cand,
+            cx=cx_cand, cy=cy_cand, k1=k1_ap_cand
         )
         loss = menger_curvature_loss(frame, cam=modified_cam, loss=loss_type, step=step)
         if debug_output():
@@ -604,12 +917,129 @@ def strategy_nelder_mead(frame: FrameBundle, master_cam: ProjectiveCamera, coars
     solved_k1_ap = k1_mid + (solved_k_norm * 2.0 * k1_radius)
     solved_cx = cx_mid + (solved_cx_norm * 2.0 * delta_c)
     solved_cy = cy_mid + (solved_cy_norm * 2.0 * delta_c)
-    return solved_k1_ap, solved_cx, solved_cy
+    return solved_k1_ap, solved_cx, solved_cy, opt_res.fun
+
+
+def strategy_nelder_mead_pool(
+    frames: [FrameBundle],
+    master_cam: ProjectiveCamera,
+    coarse: bool = True,
+    optimize_k2: bool = False) -> tuple:
+    """Nelder-Mead optimization strategy over a single frame or pooled frames.
+
+    Args:
+        frames: Single FrameBundle or sequence of FrameBundle instances.
+        master_cam: Anchor ProjectiveCamera defining search midpoints and aperture.
+        coarse: If True, uses wide search bounds; if False, refines in a tight window.
+        optimize_k2: If True, optimizes 4D space (k1, k2, cx, cy); else 3D (k1, cx, cy).
+
+    Returns:
+        Tuple of (solved_k1_ap, solved_k2_ap, solved_cx, solved_cy).
+    """
+    frame_pool = (frames,) if isinstance(frames, FrameBundle) else tuple(frames)
+    img_shape = master_cam.img_shape
+    r_ap = master_cam.aperture_radius()
+
+    # Search interval midpoints and half-spans
+    barrel_k1_range = 0.7
+    k1_mid = -barrel_k1_range / 2.0
+    k1_radius = abs(k1_mid) - 1e-6
+
+    k2_mid = float(master_cam.distortion_coefs.get("k2", 0.0))
+    k2_radius = 0.25
+
+    cx_mid = float(master_cam.cx)
+    cy_mid = float(master_cam.cy)
+    delta_c = 10.0
+
+    loss_type = "menger"
+    step = 5
+
+    if not coarse:
+        k1_mid = float(master_cam.k1)
+        k1_radius *= 0.1
+        k2_radius = 0.05
+        delta_c = 3.0
+        step = 7
+
+    def aperture_menger_objective(params: np.ndarray) -> float:
+        if optimize_k2:
+            k1_norm, k2_norm, cx_norm, cy_norm = params
+            k2_ap_cand = k2_mid + (k2_norm * 2.0 * k2_radius)
+        else:
+            k1_norm, cx_norm, cy_norm = params
+            k2_ap_cand = k2_mid
+
+        k1_ap_cand = k1_mid + (k1_norm * 2.0 * k1_radius)
+        cx_cand = cx_mid + (cx_norm * 2.0 * delta_c)
+        cy_cand = cy_mid + (cy_norm * 2.0 * delta_c)
+
+        if k1_ap_cand > -1e-6:
+            return 1e6
+
+        dist_coefs = {"k1": k1_ap_cand}
+        if abs(k2_ap_cand) > 1e-12:
+            dist_coefs["k2"] = k2_ap_cand
+
+        modified_cam = ProjectiveCamera(
+            img_shape=img_shape,
+            fx_px=r_ap,
+            fy_px=r_ap,
+            cx=cx_cand,
+            cy=cy_cand,
+            distortion_coefs=dist_coefs,
+        )
+        return pooled_menger_curvature_loss(
+            frames=frame_pool,
+            cam=modified_cam,
+            loss=loss_type,
+            step=step,
+        )
+
+    dim = 4 if optimize_k2 else 3
+    x0 = np.zeros(dim, dtype=np.float64)
+    step_size = 0.1
+
+    # Construct non-degenerate initial simplex in normalized R^3 or R^4 space
+    initial_simplex = np.tile(x0, (dim + 1, 1))
+    for i in range(dim):
+        initial_simplex[i + 1, i] += step_size
+
+    opt_res = scipy.optimize.minimize(
+        fun=aperture_menger_objective,
+        x0=x0,
+        method="Nelder-Mead",
+        options={
+            "initial_simplex": initial_simplex,
+            "xatol": 1e-3,
+            "fatol": 1e-6,
+            "maxiter": 150 if optimize_k2 else 100,
+            "disp": False,
+        },
+    )
+
+    if not opt_res.success:
+        raise ValueError(
+            "Nelder-Mead loose convergence criteria reached on this frame pass."
+        )
+
+    if optimize_k2:
+        solved_k1_norm, solved_k2_norm, solved_cx_norm, solved_cy_norm = opt_res.x
+        solved_k2_ap = k2_mid + (solved_k2_norm * 2.0 * k2_radius)
+    else:
+        solved_k1_norm, solved_cx_norm, solved_cy_norm = opt_res.x
+        solved_k2_ap = k2_mid
+
+    solved_k1_ap = k1_mid + (solved_k1_norm * 2.0 * k1_radius)
+    solved_cx = cx_mid + (solved_cx_norm * 2.0 * delta_c)
+    solved_cy = cy_mid + (solved_cy_norm * 2.0 * delta_c)
+
+    return float(solved_k1_ap), float(solved_k2_ap), float(solved_cx), float(solved_cy)
 
 
 def strategy_cascade_search(frame, master_cam) -> tuple:
 
-    k1_coarse, cx_coarse, cy_coarse = strategy_nelder_mead(frame, master_cam)
+    k1_coarse, cx_coarse, cy_coarse, _ = strategy_nelder_mead(frame, master_cam)
 
     coarse_cam = ProjectiveCamera(
         img_shape=master_cam.img_shape,
@@ -677,7 +1107,7 @@ def strategy_brent_grid(frame:FrameBundle, master_cam:ProjectiveCamera) -> tuple
         row += 1
     if debug_output()():
         print(k1_grid)
-    return best_final_k1_ap, best_final_cx, best_final_cy
+    return best_final_k1_ap, best_final_cx, best_final_cy, best_global_loss
 
 
 class MultiFrameCalibrator:
@@ -699,18 +1129,20 @@ class MultiFrameCalibrator:
         self.img_shape = camera_object.img_shape
         self.orig_fx = camera_object.fx_px
         self.orig_fy = camera_object.fy_px
-        self.orig_k1_ap = 0.
         self.N = N
         self.MIN_LEN = MIN_LEN
+        self.coarse = False
 
         # Stateful cache arrays to accumulate tracked metrics over time
         self.cached_k1_ap = []
         self.cached_cx = []
         self.cached_cy = []
+        self.cached_loss = []
         self.frames = []
         self.optimization_strategy = strategy_cascade_search
 
-    def add_frame(self, topological_matrix: np.ndarray, detected_points: np.ndarray, point_weights: np.ndarray=None) -> dict:
+    def add_frame(self, topological_matrix: np.ndarray, detected_points: np.ndarray, point_weights: np.ndarray=None,
+                  initial_pose=None) -> dict:
         """
         Processes a single frame: solves localized [k1_ap, cx, cy] via isolated
         Menger curvature, rectifies line tracks, caches the resolved vanishing
@@ -723,25 +1155,27 @@ class MultiFrameCalibrator:
             print(" -> [Warning] Skipping added frame: insufficient lines.")
             return {"status": "failed", "message": "Insufficient line density harvested."}
 
-        try:
-            solved_k1_ap, solved_cx, solved_cy = self.optimization_strategy(frame, self.master_cam)
-        except Exception as e:
-            print(f" -> [Warning] External optimization strategy failed. Error: {str(e)}")
-            return {"status": "failed", "message": "External optimization engine exception."}
+        #try:
+        #    solved_k1_ap, solved_cx, solved_cy, solved_loss = self.optimization_strategy(frame, self.master_cam)
+        #except Exception as e:
+        #    print(f" -> [Warning] External optimization strategy failed. Error: {str(e)}")
+        #    return {"status": "failed", "message": "External optimization engine exception."}
 
         # 5. Push extracted metrics straight into the accumulator cache state
-        self.cached_k1_ap.append(solved_k1_ap)
-        self.cached_cx.append(solved_cx)
-        self.cached_cy.append(solved_cy)
+        #self.cached_k1_ap.append(solved_k1_ap)
+        #self.cached_cx.append(solved_cx)
+        #self.cached_cy.append(solved_cy)
+        #self.cached_loss.append(solved_loss)
         self.frames.append(frame)
-        print(f" -> [SUCCESS] Radial distortion cx={solved_cx} cy={solved_cy} k1_ap={solved_k1_ap}")
-
+        #print(f" -> [SUCCESS] Radial distortion cx={solved_cx} cy={solved_cy} k1_ap={solved_k1_ap}")
+        #return {
+        #    "status": "success",
+        #    "local_cx": solved_cx,
+        #    "local_cy": solved_cy,
+        #    "local_k1_ap": solved_k1_ap
+        #}
         return {
-            "status": "success",
-            "local_cx": solved_cx,
-            "local_cy": solved_cy,
-            "local_k1_ap": solved_k1_ap
-        }
+            "status": "success"}
 
     def calibrate(self) -> dict:
         """
@@ -755,28 +1189,65 @@ class MultiFrameCalibrator:
                 "message": "Calibration failed because no valid target tracking frames have been accumulated yet."
             }
 
-        mean_cx = np.median(self.cached_cx)
-        mean_cy = np.median(self.cached_cy)
-        mean_k1_ap = np.median(self.cached_k1_ap)
+        #losses = np.asarray(self.cached_loss, dtype=np.float64)
+        epsilon = 1.e-12
+        # Inverse-squared loss weighting with numerical stability floor
+        #weights = 1.0 / (losses * losses + epsilon)
+        #weights /= np.sum(weights)
+
+        #dist_cx = float(np.sum(weights * np.asarray(self.cached_cx, dtype=np.float64)))
+        #dist_cy = float(np.sum(weights * np.asarray(self.cached_cy, dtype=np.float64)))
+        #k1_ap = float(np.sum(weights * np.asarray(self.cached_k1_ap, dtype=np.float64)))
+
         r_ap=self.master_cam.aperture_radius()
+        #aperture_cam = ProjectiveCamera(
+        #    self.img_shape, r_ap, r_ap,
+        #    dist_cx, dist_cy, k1=k1_ap,
+        #    mode=self.master_cam.mode
+        #)
+
+        aperture_cam = ProjectiveCamera(
+            self.img_shape,
+            r_ap,
+            r_ap,
+            self.master_cam.cx,
+            self.master_cam.cy,
+            mode=self.master_cam.mode
+        )
+        k1_ap, k2_ap, dist_cx, dist_cy = strategy_nelder_mead_pool(self.frames, aperture_cam, coarse=True, optimize_k2=False)
         aperture_cam = ProjectiveCamera(
             self.img_shape, r_ap, r_ap,
-            mean_cx, mean_cy, mean_k1_ap,
-            self.master_cam.mode
+            dist_cx, dist_cy, k1=k1_ap,
+            mode=self.master_cam.mode,
+            distortion_coefs=None
+        )
+
+        k1_ap, k2_ap, dist_cx, dist_cy = \
+            strategy_nelder_mead_pool(self.frames, aperture_cam, self.coarse, optimize_k2 = True)
+
+        dist_coefs_ap = {"k1": k1_ap}
+        if abs(k2_ap) > epsilon:
+            dist_coefs_ap["k2"] = k2_ap
+
+        aperture_cam = ProjectiveCamera(
+            self.img_shape, r_ap, r_ap,
+            dist_cx, dist_cy, k1=k1_ap,
+            mode=self.master_cam.mode,
+            distortion_coefs=dist_coefs_ap
         )
 
         print(f"\n -> Finalizing Multi-Frame Calibration: Processing {len(self.frames)} pooled views...")
         global_multi_view_vps = []
         for frame in self.frames:
             vanishing_points = frame.estimate_vp(aperture_cam)
-            print(vanishing_points)
             global_multi_view_vps.append(vanishing_points)
 
         if len(self.frames) == 1:
-            zhang_res = solve_weak_perspectivity_matrix(global_multi_view_vps[0], cx=mean_cx, cy=mean_cy)
+            zhang_res = solve_weak_perspectivity_matrix(global_multi_view_vps[0], cx=dist_cx, cy=dist_cy)
         else:
             print(" -> Run the joint Zhang multi-frame engine...")
-            zhang_res = solve_multi_frame_zhang_matrix(global_multi_view_vps, cx=mean_cx, cy=mean_cy)
+            zhang_res = solve_multi_frame_zhang(global_multi_view_vps, cx_init=dist_cx, cy_init=dist_cy)
+            print(zhang_res)
 
         if zhang_res["status"] != "success":
             print(f" -> [ERROR] Matrix solver failed to resolve structural constraints: {zhang_res['message']}")
@@ -787,26 +1258,33 @@ class MultiFrameCalibrator:
         if final_mode == "perspective":
             fx_px = zhang_res["fx"]
             fy_px = zhang_res["fy"]
+            cx_px = zhang_res["cx"]
+            cy_px = zhang_res["cy"]
         else:
             print(" -> [INFO] Weak-perspectivity identified. Retaining original baseline focal scales.")
             return {"status": "failed", "message": "Weak-perspectivity identified."}
 
         final_cam = ProjectiveCamera(
-            self.img_shape, fx_px, fy_px,
-            mean_cx, mean_cy
+            self.img_shape, fx_px, fy_px, cx_px, cy_px
         )
-        k1 = final_cam.convert_aperture_to_focal(mean_k1_ap)
-        final_cam.set_distortion(k1)
-        print("\n=======================================================")
-        print("      GLOBAL HGP PIPELINE CALIBRATION SUCCESS          ")
-        print("=======================================================")
-        print(f" -> Mode Selected                : {final_mode.upper()} ENGINE")
-        print(f" -> Total Processed Views        : {len(self.frames)}")
-        print(f" -> Solved Focal Length (fx,fy)  : {final_cam.fx_px:.2f}, {final_cam.fy_px:.2f}")
-        print(f" -> Solved Principal Point(cx,cy): {final_cam.cx:.2f}, {final_cam.cy:.2f}")
-        print(f" -> Resolved Aperture k1         : {mean_k1_ap:.8f}")
-        print(f" -> Resolved Brown-Conrady k1    : {final_cam.k1:.8f}")
-        print("=======================================================\n")
+        final_dist_coefs = {}
+        values = final_cam.convert_aperture_to_focal(dist_coefs_ap.values())
+        for key, value in zip(dist_coefs_ap.keys(), values):
+            final_dist_coefs[key] = value
+        final_cam.set_distortion(final_dist_coefs,distortion_center=(dist_cx, dist_cy))
+
+        if debug_output():
+            print("\n=======================================================")
+            print("      GLOBAL PIPELINE CALIBRATION SUCCESS")
+            print("=======================================================")
+            print(f" -> Mode Selected                 : {final_mode.upper()} ENGINE")
+            print(f" -> Total Processed Views         : {len(self.frames)}")
+            print(f" -> Solved Focal Length (fx,fy)   : {final_cam.fx_px:.2f}, {final_cam.fy_px:.2f}")
+            print(f" -> Solved Principal Point(cx,cy) : {final_cam.cx:.2f}, {final_cam.cy:.2f}")
+            print(f" -> Distortion Center(cx,cy)      : {dist_cx:.2f}, {dist_cy:.2f}")
+            print(f" -> Resolved Aperture(k1,k2,p1,p2): {dist_coefs_ap}")
+            print(f" -> Resolved Brown-Conrady        : {final_cam.distortion_coefs}")
+            print("=======================================================\n")
 
         return {
             "status": "success",
@@ -814,7 +1292,12 @@ class MultiFrameCalibrator:
             "img_shape" : final_cam.img_shape,
             "fx": final_cam.fx_px, "fy": final_cam.fy_px,
             "cx": final_cam.cx, "cy": final_cam.cy,
-            "radial_k1_ap": mean_k1_ap, "k1": final_cam.k1
+            "k1_ap": k1_ap, "k1": final_cam.k1,
+            "coefs_ap": dist_coefs_ap,
+            "coefs": final_cam.distortion_coefs,
+            "k2": final_cam.distortion_coefs.get("k2",0.),
+            "p1": final_cam.distortion_coefs.get("p1", 0.),
+            "p2": final_cam.distortion_coefs.get("p2", 0.),
         }
 
     def statistics(self) -> dict:

@@ -1,19 +1,12 @@
 import sys
 import argparse
 import os
-import numpy as np
 
-from opencv_baseline_engine import OpenCVCirclesGridMeshGenerator, OpenCVGridDetector
+from opencv_baseline_engine import \
+    OpenCVCirclesGridMeshGenerator, OpenCVGridDetector, generate_opencv_unary_blueprint, OpenCVMultiFrameCalibrator
+
 from generate import PhysicalMeshGenerator, generate_triangular_gray_grid
 from detector import HexagonalTopologyDetector
-
-
-def generate_opencv_unary_blueprint(rows, cols):
-    """
-    OpenCV's cv2.findCirclesGrid demands a pristine array where every node is an identical
-    circle tracking element (0). Missing cells or token variances crash the OpenCV graph solver.
-    """
-    return np.zeros((rows, cols), dtype=np.int32)
 
 
 def pattern_blueprint(engine_name, rows, cols):
@@ -44,7 +37,7 @@ def mesh_generator_factory(engine_name, grid_matrix, step_mm, r_circ, density=2.
     engine_key = str(engine_name).strip().lower()
 
     if engine_key in ["hgp", "hexagonal"]:
-        print("Factory: Constructing Hexagonal Calibration Engine")
+        print("Factory: Hexagonal Calibration Pattern Mesh")
         return PhysicalMeshGenerator(
             grid_matrix=grid_matrix,
             step_mm=step_mm,
@@ -53,7 +46,7 @@ def mesh_generator_factory(engine_name, grid_matrix, step_mm, r_circ, density=2.
         )
 
     elif engine_key in ["chessboard", "circles", "asymmetric_circles"]:
-        print(f"Factory: Constructing standard Baseline Engine")
+        print(f"Factory: Constructing Baseline Pattern Mesh")
         return OpenCVCirclesGridMeshGenerator(
             grid_matrix=grid_matrix,
             grid_shape=engine_key,
@@ -87,6 +80,7 @@ def create_detector(engine_name, grid_rows, grid_cols):
         return OpenCVGridDetector(grid_rows=grid_rows, grid_cols=grid_cols, pattern_type=engine_key)
 
     raise KeyError(f"Unsupported validation engine type token requested: '{engine_key}'")
+
 
 def parse_arguments(description="Benchmarking Controller"):
     """

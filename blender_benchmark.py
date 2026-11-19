@@ -538,8 +538,6 @@ def hexagonal_rotations_cases(intrinsics, base_blueprint):
 def random_tilt_cases(intrinsics, base_blueprint):
     """
     Generates a structured test case suite in pure photogrammetric coordinates.
-    FIX: Corrects the translation compensation vector along the photogrammetric
-    X-axis to align perfectly with positive Yaw rotations.
     """
     random.seed(42)
 
